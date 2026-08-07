@@ -7,6 +7,7 @@ mod io;
 mod opencode;
 mod parse;
 mod picker;
+mod resident;
 mod select;
 mod validate;
 

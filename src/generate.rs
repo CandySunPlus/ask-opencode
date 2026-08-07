@@ -10,7 +10,7 @@ pub fn run(args: GenerateArgs) -> i32 {
     let model = args.model.as_deref().or(config.model.as_deref());
     let snapshot = ContextSnapshot::collect(&config);
     let request = format!("{}\n\n请求：{}", snapshot.render(), args.request);
-    match crate::opencode::invoke(&request, agent, model) {
+    match crate::opencode::invoke(&request, agent, model, &config) {
         Ok(output) => {
             if !output.status.success() {
                 if !output.stderr.is_empty() {
@@ -26,7 +26,7 @@ pub fn run(args: GenerateArgs) -> i32 {
             let final_candidates = if failing.is_empty() {
                 passing
             } else {
-                correction_round(&failing, &passing, agent, model)
+                correction_round(&failing, &passing, agent, model, &config)
             };
             crate::parse::emit_candidates(&final_candidates, "generate")
         }
@@ -59,10 +59,11 @@ fn correction_round(
     passing: &[String],
     agent: &str,
     model: Option<&str>,
+    config: &Config,
 ) -> Vec<String> {
     let mut result = passing.to_vec();
     let fix_request = build_fix_request(failing);
-    let Ok(output) = crate::opencode::invoke(&fix_request, agent, model) else {
+    let Ok(output) = crate::opencode::invoke(&fix_request, agent, model, config) else {
         return result;
     };
     if !output.status.success() {
