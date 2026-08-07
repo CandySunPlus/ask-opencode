@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues live in this repo's GitHub Issues, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues live in this repo's GitHub Issues, via the `gh` CLI. 实现票收尾时按**交付流程**走：功能分支提 PR（验收方法进正文）、勾 AC、等维护者合并——见 `docs/agents/issue-tracker.md`。
 
 ### Triage labels
 

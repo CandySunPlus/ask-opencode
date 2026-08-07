@@ -13,16 +13,20 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
-## 勾选 AC 的流程
+## 实现票交付流程
 
-实现票收尾时按此流程处理 AC：
+实现票在功能分支上开发，收尾按此流程处理：
 
-1. **勾选**：实现完成、验收方法已产出后，agent 把对应 issue 的 AC 从 `[ ]` 勾为 `[x]`。
-2. **验收方法维护在 PR 正文**：PR 正文含「验收方法」小节，逐条给可复现的黑盒命令 + 预期输出；评论里不放验收项。
-3. **缺口归宿**：勾选后把实现留白逐项安排去处——明确留给后续 issue 的，检查其 AC 是否已覆盖，未覆盖就补 AC 项；无票承接的，按需新建 issue、写进 ADR（代码里引编号）或记入待决策事项表。
-4. **评论只记来历**：在 issue 评论说明每个缺口的去向与补了哪些 AC；评论不维护验收项。
+1. **提 PR**：测试通过后从功能分支向 `main` 提 PR（不直接提交 `main`）。PR 正文含「验收方法」小节，逐条给可复现的黑盒命令 + 预期输出；评论里不放验收项。
+2. **勾 AC**：把对应 issue 的 AC 从 `[ ]` 勾为 `[x]`。
+3. **缺口归宿**：把实现留白逐项安排去处
+    1. 明确留给后续 issue 的，检查其 AC 是否已覆盖，未覆盖就补 AC 项，同时评论变动来历原因；评论不维护验收项；
+    2. 无票承接的，按需新建 issue;
+    3. 成为决策的写进 ADR，并在代码注释里引编号;
+    4. 需要后续决策的记入待决策事项表。
+4. **等维护者合并**：以上就绪即止步，交由维护者合并。
 
-完成标准：每条留白都有归宿（后续 issue AC / 新 issue / ADR / 待决策表），评论里找不到验收清单。
+完成标准：PR 已提且验收方法在正文、AC 全勾、每条留白都有归宿（后续 issue AC / 新 issue / ADR / 待决策表），等待维护者合并。
 
 ## Pull requests as a triage surface
 
