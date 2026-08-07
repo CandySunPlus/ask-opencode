@@ -21,6 +21,8 @@ pub struct Config {
     pub picker: String,
     /// 外部 fzf 可执行文件路径；仅在 `picker` 为 `fzf` 时使用。
     pub fzf_bin: String,
+    /// 是否启用常驻 opencode serve（ADR-0004）：首次调用自动拉起、后续 `run --attach` 复用。
+    pub resident: bool,
 }
 
 impl Default for Config {
@@ -34,6 +36,7 @@ impl Default for Config {
             sensitive_rules: Vec::new(),
             picker: "skim".to_string(),
             fzf_bin: "fzf".to_string(),
+            resident: true,
         }
     }
 }
@@ -63,6 +66,11 @@ fn config_path() -> Option<PathBuf> {
     }
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".config/ask-opencode/config.json"))
+}
+
+/// 常驻 serve 状态文件路径：与配置文件同目录、文件名 server.json（ADR-0004）。
+pub fn state_path() -> Option<PathBuf> {
+    Some(config_path()?.with_file_name("server.json"))
 }
 
 /// 环境变量按字段覆盖配置；解析失败时保留文件里的值。
@@ -97,6 +105,11 @@ fn apply_env_overrides(config: &mut Config) {
         && !value.is_empty()
     {
         config.fzf_bin = value.to_string_lossy().into_owned();
+    }
+    if let Some(value) = std::env::var_os("ASK_OPENCODE_RESIDENT")
+        && let Some(on) = parse_bool(&value)
+    {
+        config.resident = on;
     }
 }
 

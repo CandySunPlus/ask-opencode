@@ -26,7 +26,9 @@ pub fn run_with(args: &[&str], envs: &[(&str, &str)], stdin: &str) -> Output {
     cmd.current_dir(dir.path())
         .args(args)
         .env("HISTFILE", &hist)
-        .env("ASK_OPENCODE_CONFIG", dir.path().join("no-config.json"));
+        .env("ASK_OPENCODE_CONFIG", dir.path().join("no-config.json"))
+        // 常驻 serve 单独在 tests/resident.rs 覆盖；这里默认关，保证冷启动路径确定性。
+        .env("ASK_OPENCODE_RESIDENT", "false");
     cmd.envs(envs.iter().copied()).write_stdin(stdin);
     cmd.output().unwrap()
 }
@@ -38,7 +40,8 @@ pub fn run_in_dir_with_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> 
     cmd.current_dir(dir)
         .args(args)
         .env("HISTFILE", &hist)
-        .env("ASK_OPENCODE_CONFIG", dir.join("no-config.json"));
+        .env("ASK_OPENCODE_CONFIG", dir.join("no-config.json"))
+        .env("ASK_OPENCODE_RESIDENT", "false");
     cmd.envs(envs.iter().copied());
     cmd.output().unwrap()
 }

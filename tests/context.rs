@@ -26,6 +26,11 @@ fn generate_with(dir: &Path, shim: &Path, history: &str, extra_env: &[(&str, &st
             log.to_str().unwrap().to_string(),
         ),
         (
+            // 常驻 serve 单独在 tests/resident.rs 覆盖；这里关掉，保证上下文快照测试走冷启动。
+            "ASK_OPENCODE_RESIDENT".to_string(),
+            "false".to_string(),
+        ),
+        (
             // 指向不存在的配置路径，隔离开发者真实 ~/.config/ask-opencode/config.json。
             "ASK_OPENCODE_CONFIG".to_string(),
             dir.join("no-config.json").to_str().unwrap().to_string(),

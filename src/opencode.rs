@@ -1,3 +1,4 @@
+use crate::config::Config;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -21,15 +22,29 @@ pub fn resolve_bin() -> Result<PathBuf, OpenCodeError> {
     Ok(PathBuf::from("opencode"))
 }
 
-/// 按 `opencode run --agent <agent> [-m <model>] <request>` 调用外部二进制，返回其完整输出。
+/// 按 `opencode run [--attach <url>] --agent <agent> [-m <model>] <request>` 调用外部二进制，
+/// 返回其完整输出。常驻开关打开时先确保 serve 在跑，用 `--attach` 复用（ADR-0004）。
 pub fn invoke(
     request: &str,
     agent: &str,
     model: Option<&str>,
+    config: &Config,
 ) -> Result<std::process::Output, OpenCodeError> {
     let bin = resolve_bin()?;
     let mut cmd = Command::new(&bin);
-    cmd.arg("run").arg("--agent").arg(agent);
+    cmd.arg("run");
+    if config.resident {
+        match crate::resident::ensure_server_url(&bin) {
+            Ok(url) => {
+                cmd.arg("--attach").arg(&url);
+            }
+            Err(err) => {
+                // serve 拉起失败退化为冷启动，保留可诊断的错误提示（ADR-0004）。
+                eprintln!("resident: {}", err.message);
+            }
+        }
+    }
+    cmd.arg("--agent").arg(agent);
     if let Some(model) = model {
         cmd.arg("-m").arg(model);
     }
