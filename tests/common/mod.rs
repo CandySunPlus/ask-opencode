@@ -60,9 +60,20 @@ pub fn write_history(dir: &Path, content: &str) -> PathBuf {
     path
 }
 
-/// 在指定目录写一个可执行的 fake opencode shim，返回其路径。
+/// 写一个可执行的 fake opencode shim，返回其路径。
 pub fn write_fake_opencode(dir: &Path, script: &str) -> PathBuf {
-    let path = dir.join("opencode");
+    write_fake_bin(dir, "opencode", script)
+}
+
+/// 写一个可执行的 fake fzf shim：把 stdin 原样写入 `$FZF_INPUT_LOG`，再把 `$FZF_SELECT`
+/// 以 NUL 结尾打到 stdout，模拟用户在 fzf 里选中一条候选。返回其路径。
+pub fn write_fake_fzf(dir: &Path) -> PathBuf {
+    let script = "cat > \"$FZF_INPUT_LOG\"\nprintf '%s\\0' \"$FZF_SELECT\"\n";
+    write_fake_bin(dir, "fzf", script)
+}
+
+fn write_fake_bin(dir: &Path, name: &str, script: &str) -> PathBuf {
+    let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
     #[cfg(unix)]
     {
