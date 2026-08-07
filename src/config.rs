@@ -7,12 +7,15 @@ use std::path::PathBuf;
 pub struct Config {
     /// 调用 opencode 时使用的 agent。
     pub agent: String,
+    /// 调用 opencode 时使用的模型（provider/model），空则用 opencode 默认。
+    pub model: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             agent: "cmd-gen".to_string(),
+            model: None,
         }
     }
 }

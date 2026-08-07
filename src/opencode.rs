@@ -21,16 +21,20 @@ pub fn resolve_bin() -> Result<PathBuf, OpenCodeError> {
     Ok(PathBuf::from("opencode"))
 }
 
-/// 按 `opencode run --agent <agent> <request>` 调用外部二进制，返回其完整输出。
-pub fn invoke(request: &str, agent: &str) -> Result<std::process::Output, OpenCodeError> {
+/// 按 `opencode run --agent <agent> [-m <model>] <request>` 调用外部二进制，返回其完整输出。
+pub fn invoke(
+    request: &str,
+    agent: &str,
+    model: Option<&str>,
+) -> Result<std::process::Output, OpenCodeError> {
     let bin = resolve_bin()?;
-    Command::new(&bin)
-        .arg("run")
-        .arg("--agent")
-        .arg(agent)
-        .arg(request)
-        .output()
-        .map_err(|err| OpenCodeError {
-            message: format!("无法启动 {}: {err}", bin.display()),
-        })
+    let mut cmd = Command::new(&bin);
+    cmd.arg("run").arg("--agent").arg(agent);
+    if let Some(model) = model {
+        cmd.arg("-m").arg(model);
+    }
+    cmd.arg(request);
+    cmd.output().map_err(|err| OpenCodeError {
+        message: format!("无法启动 {}: {err}", bin.display()),
+    })
 }

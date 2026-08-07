@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod context;
 mod generate;
 mod io;
 mod opencode;
