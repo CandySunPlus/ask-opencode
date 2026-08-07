@@ -26,6 +26,11 @@ pub fn ensure_server_url(bin: &Path) -> Result<String, OpenCodeError> {
     let state_path = config::state_path().ok_or_else(|| OpenCodeError {
         message: "无法确定常驻 serve 状态文件路径".to_string(),
     })?;
+    if let Some(parent) = state_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| OpenCodeError {
+            message: format!("无法创建配置目录 {}: {err}", parent.display()),
+        })?;
+    }
     if let Some(state) = load_state(&state_path)
         && is_alive(&state.url)
     {
