@@ -19,6 +19,8 @@ pub enum Command {
     Parse(ParseArgs),
     /// 校验一条候选命令
     Validate(ValidateArgs),
+    /// 在候选命令里挑一条：多条弹选择器（内嵌 skim 或外部 fzf），危险命令需 [y/N] 确认后输出
+    Select(SelectArgs),
 }
 
 #[derive(Args)]
@@ -48,4 +50,19 @@ pub struct ValidateArgs {
     /// 候选命令；不提供时从 stdin 读取
     #[arg(value_name = "CANDIDATE")]
     pub candidate: Option<String>,
+}
+
+#[derive(Args)]
+pub struct SelectArgs {
+    /// 候选命令，逐条列出（每条一个参数，多行候选也能作单条参数）
+    #[arg(value_name = "CANDIDATE", allow_hyphen_values = true)]
+    pub candidates: Vec<String>,
+
+    /// 使用的选择器：skim（内嵌）或 fzf（外部），覆盖配置默认值
+    #[arg(long)]
+    pub picker: Option<String>,
+
+    /// 外部 fzf 可执行文件路径，覆盖配置默认值
+    #[arg(long)]
+    pub fzf_bin: Option<String>,
 }

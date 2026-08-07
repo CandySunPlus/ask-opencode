@@ -17,6 +17,10 @@ pub struct Config {
     pub include_tools: bool,
     /// 敏感信息过滤的扩展规则（正则），叠加在内置黑名单之上。
     pub sensitive_rules: Vec<String>,
+    /// 选择器实现：`skim`（内嵌）或 `fzf`（外部）。
+    pub picker: String,
+    /// 外部 fzf 可执行文件路径；仅在 `picker` 为 `fzf` 时使用。
+    pub fzf_bin: String,
 }
 
 impl Default for Config {
@@ -28,6 +32,8 @@ impl Default for Config {
             include_dirstack: false,
             include_tools: false,
             sensitive_rules: Vec::new(),
+            picker: "skim".to_string(),
+            fzf_bin: "fzf".to_string(),
         }
     }
 }
@@ -82,6 +88,22 @@ fn apply_env_overrides(config: &mut Config) {
             .sensitive_rules
             .extend(split_list(&value.to_string_lossy(), ','));
     }
+    if let Some(value) = std::env::var_os("ASK_OPENCODE_PICKER")
+        && let Some(picker) = parse_picker(&value)
+    {
+        config.picker = picker;
+    }
+    if let Some(value) = std::env::var_os("ASK_OPENCODE_FZF_BIN")
+        && !value.is_empty()
+    {
+        config.fzf_bin = value.to_string_lossy().into_owned();
+    }
+}
+
+/// 解析选择器环境变量：只接受已知实现，非法值忽略（沿用配置/默认）。
+fn parse_picker(value: &std::ffi::OsStr) -> Option<String> {
+    let picker = value.to_string_lossy().trim().to_string();
+    matches!(picker.as_str(), "skim" | "fzf").then_some(picker)
 }
 
 /// 解析布尔环境变量；解析失败返回 None，沿用文件里的值。
