@@ -1,6 +1,6 @@
 ---
 description: 按 '#' 请求生成可执行命令候选
-mode: subagent
+mode: primary
 temperature: 0.2
 permission:
   "*": deny
