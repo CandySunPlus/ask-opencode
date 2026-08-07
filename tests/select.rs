@@ -221,3 +221,109 @@ fn select_does_not_break_validate() {
     let value: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["candidate"], "echo hi");
 }
+
+/// 从 JSON 候选文件读候选：单候选跳过选择器直接输出（widget 的接缝，T6）。
+#[test]
+fn select_from_file_outputs_single_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("result.json");
+    std::fs::write(&file, r#"["echo hi"]"#).unwrap();
+    let out = run(&["select", "--file", file.to_str().unwrap()]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(stdout_str(&out), "echo hi\n");
+}
+
+/// 从文件读多条候选：仍走 fzf 选择器，选中后输出该候选。
+#[test]
+fn select_from_file_uses_fzf_picker_for_multiple_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake_fzf = write_fake_fzf(dir.path());
+    let input_log = dir.path().join("fzf-input.log");
+    let file = dir.path().join("result.json");
+    std::fs::write(&file, r#"["echo one","echo two"]"#).unwrap();
+    let out = run_with_env(
+        &["select", "--file", file.to_str().unwrap()],
+        &[
+            ("ASK_OPENCODE_PICKER", "fzf"),
+            ("ASK_OPENCODE_FZF_BIN", fake_fzf.to_str().unwrap()),
+            ("FZF_SELECT", "echo two"),
+            ("FZF_INPUT_LOG", input_log.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(stdout_str(&out), "echo two\n");
+}
+
+/// 从文件读到的多行候选照样能进 fzf（多行以 NUL 分隔喂入）。
+#[test]
+fn select_from_file_handles_multiline_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake_fzf = write_fake_fzf(dir.path());
+    let input_log = dir.path().join("fzf-input.log");
+    let file = dir.path().join("result.json");
+    std::fs::write(&file, r#"["line one\nline two","echo single"]"#).unwrap();
+    let out = run_with_env(
+        &["select", "--file", file.to_str().unwrap()],
+        &[
+            ("ASK_OPENCODE_PICKER", "fzf"),
+            ("ASK_OPENCODE_FZF_BIN", fake_fzf.to_str().unwrap()),
+            ("FZF_SELECT", "line one\nline two"),
+            ("FZF_INPUT_LOG", input_log.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(stdout_str(&out), "line one\nline two\n");
+}
+
+/// 从文件读候选 + 危险命令 + 确认 y：输出该命令（危险确认依然生效）。
+#[test]
+fn select_from_file_confirms_dangerous_with_y() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("result.json");
+    std::fs::write(&file, r#"["rm -rf /"]"#).unwrap();
+    let out = run_with_input(&["select", "--file", file.to_str().unwrap()], "y\n");
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(stdout_str(&out), "rm -rf /\n");
+}
+
+/// 从文件读候选 + 危险命令 + 拒绝 N：无输出。
+#[test]
+fn select_from_file_declines_dangerous_with_n() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("result.json");
+    std::fs::write(&file, r#"["rm -rf /"]"#).unwrap();
+    let out = run_with_input(&["select", "--file", file.to_str().unwrap()], "n\n");
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(stdout_str(&out), "");
+}
+
+/// 候选文件缺失：报错退出。
+#[test]
+fn select_from_missing_file_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nope.json");
+    let out = run(&["select", "--file", missing.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr_str(&out).contains("无法读取候选文件"));
+}
+
+/// 候选文件内容非法：报错退出。
+#[test]
+fn select_from_invalid_file_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("result.json");
+    std::fs::write(&file, "not json at all").unwrap();
+    let out = run(&["select", "--file", file.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr_str(&out).contains("不是合法 JSON 数组"));
+}
+
+/// `--file` 与逐条候选互斥：同时给出按参数冲突处理。
+#[test]
+fn select_rejects_file_and_positional_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("result.json");
+    std::fs::write(&file, r#"["echo hi"]"#).unwrap();
+    let out = run(&["select", "--file", file.to_str().unwrap(), "echo other"]);
+    assert_eq!(out.status.code(), Some(2));
+}
