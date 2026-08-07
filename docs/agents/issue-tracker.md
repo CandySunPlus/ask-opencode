@@ -13,9 +13,16 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
-## 实现票的验收
+## 勾选 AC 的流程
 
-AC 的勾选权在维护者（人）手里，agent 不改 issue 里的勾选框；agent 开 PR 时在 PR 正文或评论区给出逐条「验收方法」——可复现的黑盒命令 + 预期输出——维护者核实后自行勾选并 merge 关闭。这条约定也写进 issue 模板或由 agent 在每次 PR 里执行。
+实现票收尾时按此流程处理 AC：
+
+1. **勾选**：实现完成、验收方法已产出后，agent 把对应 issue 的 AC 从 `[ ]` 勾为 `[x]`。
+2. **验收方法维护在 PR 正文**：PR 正文含「验收方法」小节，逐条给可复现的黑盒命令 + 预期输出；评论里不放验收项。
+3. **缺口归宿**：勾选后把实现留白逐项安排去处——明确留给后续 issue 的，检查其 AC 是否已覆盖，未覆盖就补 AC 项；无票承接的，按需新建 issue、写进 ADR（代码里引编号）或记入待决策事项表。
+4. **评论只记来历**：在 issue 评论说明每个缺口的去向与补了哪些 AC；评论不维护验收项。
+
+完成标准：每条留白都有归宿（后续 issue AC / 新 issue / ADR / 待决策表），评论里找不到验收清单。
 
 ## Pull requests as a triage surface
 
