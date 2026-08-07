@@ -19,16 +19,45 @@ pub fn run_with_input(args: &[&str], stdin: &str) -> Output {
 }
 
 pub fn run_with(args: &[&str], envs: &[(&str, &str)], stdin: &str) -> Output {
+    // 在临时目录里跑：避免读到真实 ~/.zsh_history、真实用户配置与所在 git 仓库污染断言。
+    let dir = tempfile::tempdir().unwrap();
+    let hist = write_history(dir.path(), "");
     let mut cmd = Command::cargo_bin("ask-opencode").unwrap();
-    cmd.args(args).envs(envs.iter().copied()).write_stdin(stdin);
+    cmd.current_dir(dir.path())
+        .args(args)
+        .env("HISTFILE", &hist)
+        .env("ASK_OPENCODE_CONFIG", dir.path().join("no-config.json"));
+    cmd.envs(envs.iter().copied()).write_stdin(stdin);
     cmd.output().unwrap()
 }
 
-/// 指定工作目录后以 argv + env 黑盒驱动 ask-opencode 二进制。
+/// 指定工作目录后以 argv + env 黑盒驱动 ask-opencode 二进制，默认注入空 HISTFILE 与不存在的配置路径。
 pub fn run_in_dir_with_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let hist = write_history(dir, "");
     let mut cmd = Command::cargo_bin("ask-opencode").unwrap();
-    cmd.current_dir(dir).args(args).envs(envs.iter().copied());
+    cmd.current_dir(dir)
+        .args(args)
+        .env("HISTFILE", &hist)
+        .env("ASK_OPENCODE_CONFIG", dir.join("no-config.json"));
+    cmd.envs(envs.iter().copied());
     cmd.output().unwrap()
+}
+
+/// 以 owned env（可带任意 String 值）在指定目录驱动二进制，不做任何默认注入。
+pub fn run_in_dir_owned(dir: &Path, args: &[&str], envs: &[(String, String)]) -> Output {
+    let mut cmd = Command::cargo_bin("ask-opencode").unwrap();
+    cmd.current_dir(dir).args(args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.output().unwrap()
+}
+
+/// 在目录里写 zsh 历史文件，返回其路径。
+pub fn write_history(dir: &Path, content: &str) -> PathBuf {
+    let path = dir.join("zsh_history");
+    std::fs::write(&path, content).unwrap();
+    path
 }
 
 /// 在指定目录写一个可执行的 fake opencode shim，返回其路径。

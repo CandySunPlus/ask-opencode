@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
-/// 配置骨架：字段随后续票按需增长，环境变量优先于文件。
+/// 配置：默认值起步，文件存在则用文件覆盖，再按字段套环境变量覆盖（文件 + env 合并）。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -9,6 +9,14 @@ pub struct Config {
     pub agent: String,
     /// 调用 opencode 时使用的模型（provider/model），空则用 opencode 默认。
     pub model: Option<String>,
+    /// 上下文快照注入的命令历史条数上限（默认 20）。
+    pub history_limit: usize,
+    /// 上下文快照是否注入 dirstack（默认关闭）。
+    pub include_dirstack: bool,
+    /// 上下文快照是否注入工具列表（默认关闭）。
+    pub include_tools: bool,
+    /// 敏感信息过滤的扩展规则（正则），叠加在内置黑名单之上。
+    pub sensitive_rules: Vec<String>,
 }
 
 impl Default for Config {
@@ -16,17 +24,22 @@ impl Default for Config {
         Config {
             agent: "cmd-gen".to_string(),
             model: None,
+            history_limit: 20,
+            include_dirstack: false,
+            include_tools: false,
+            sensitive_rules: Vec::new(),
         }
     }
 }
 
 impl Config {
-    /// 加载配置：先取默认值，文件存在则用文件覆盖。
+    /// 加载配置：默认值起步，文件存在则用文件覆盖，再按字段套环境变量覆盖。
     pub fn load() -> Self {
         let mut config = Config::default();
         if let Some(from_file) = load_from_file() {
             config = from_file;
         }
+        apply_env_overrides(&mut config);
         config
     }
 }
@@ -44,4 +57,43 @@ fn config_path() -> Option<PathBuf> {
     }
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".config/ask-opencode/config.json"))
+}
+
+/// 环境变量按字段覆盖配置；解析失败时保留文件里的值。
+fn apply_env_overrides(config: &mut Config) {
+    if let Some(value) = std::env::var_os("ASK_OPENCODE_HISTORY_LIMIT")
+        && let Ok(limit) = value.to_string_lossy().parse::<usize>()
+    {
+        config.history_limit = limit;
+    }
+    if let Some(value) = std::env::var_os("ASK_OPENCODE_INCLUDE_DIRSTACK")
+        && let Some(on) = parse_bool(&value)
+    {
+        config.include_dirstack = on;
+    }
+    if let Some(value) = std::env::var_os("ASK_OPENCODE_INCLUDE_TOOLS")
+        && let Some(on) = parse_bool(&value)
+    {
+        config.include_tools = on;
+    }
+    if let Some(value) = std::env::var_os("ASK_OPENCODE_SENSITIVE_RULES") {
+        // 列表字段按「文件 + env 合并」语义：env 规则追加到文件规则之上，而非替换（见 ADR-0005）。
+        config
+            .sensitive_rules
+            .extend(split_list(&value.to_string_lossy(), ','));
+    }
+}
+
+/// 解析布尔环境变量；解析失败返回 None，沿用文件里的值。
+fn parse_bool(value: &std::ffi::OsStr) -> Option<bool> {
+    value.to_string_lossy().trim().parse::<bool>().ok()
+}
+
+/// 按分隔符拆字符串为去空白、去空项的条目列表。
+fn split_list(value: &str, sep: char) -> Vec<String> {
+    value
+        .split(sep)
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
 }

@@ -1,0 +1,323 @@
+mod common;
+use common::*;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Output;
+
+const SHIM_ECHO_ARGS: &str = "printf '%s\\n' \"$@\"";
+
+/// 建 tempdir + fake opencode，返回 (dir, shim 路径)。
+fn setup() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = write_fake_opencode(dir.path(), SHIM_ECHO_ARGS);
+    (dir, shim)
+}
+
+/// 注入受控历史与额外 env，跑 generate，返回输出。
+fn generate_with(dir: &Path, shim: &Path, history: &str, extra_env: &[(&str, &str)]) -> Output {
+    let hist = write_history(dir, history);
+    let mut envs: Vec<(String, String)> = vec![
+        (
+            "ASK_OPENCODE_BIN".to_string(),
+            shim.to_str().unwrap().to_string(),
+        ),
+        ("HISTFILE".to_string(), hist.to_str().unwrap().to_string()),
+        (
+            // 指向不存在的配置路径，隔离开发者真实 ~/.config/ask-opencode/config.json。
+            "ASK_OPENCODE_CONFIG".to_string(),
+            dir.join("no-config.json").to_str().unwrap().to_string(),
+        ),
+    ];
+    for (k, v) in extra_env {
+        envs.push((k.to_string(), v.to_string()));
+    }
+    run_in_dir_owned(dir, &["generate", "list files"], &envs)
+}
+
+#[test]
+fn snapshot_injects_deduplicated_filtered_history_without_request_lines() {
+    let (dir, shim) = setup();
+    let long = format!("cat {}", "a".repeat(600));
+    let history = [
+        ": 1700000001:0;ls",
+        ": 1700000002:0;# 怎么压缩这个目录",
+        ": 1700000003:0;ls",
+        ": 1700000004:0;git status",
+        ": 1700000005:0;echo hello",
+        ": 1700000006:0;echo hello",
+        &format!(": 1700000007:0;{long}"),
+    ]
+    .join("\n");
+    let out = generate_with(dir.path(), &shim, &history, &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(text.contains("- ls"), "缺去重后 ls: {text}");
+    assert!(text.contains("- git status"), "缺 git status: {text}");
+    assert!(text.contains("- echo hello"), "缺 echo hello: {text}");
+    assert!(!text.contains("怎么压缩"), "不应含 # 请求行: {text}");
+    assert!(!text.contains(&"a".repeat(600)), "不应含超长行: {text}");
+    assert_eq!(text.matches("- ls").count(), 1, "应去重: {text}");
+    assert_eq!(text.matches("- echo hello").count(), 1, "应去重: {text}");
+}
+
+#[test]
+fn snapshot_filters_history_lines_containing_credentials() {
+    let (dir, shim) = setup();
+    let history = [
+        ": 1700000001:0;export API_TOKEN=abc123",
+        ": 1700000002:0;curl https://user:p4ss@example.com/data",
+        ": 1700000003:0;git clone https://github.com/foo/bar.git",
+        ": 1700000004:0;echo done",
+    ]
+    .join("\n");
+    let out = generate_with(dir.path(), &shim, &history, &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(!text.contains("API_TOKEN"), "不应泄露 token: {text}");
+    assert!(!text.contains("abc123"), "不应泄露 token 值: {text}");
+    assert!(!text.contains("user:p4ss"), "不应泄露 URL 凭据: {text}");
+    assert!(!text.contains("example.com"), "凭据 URL 整行应剔除: {text}");
+    assert!(
+        text.contains("git clone https://github.com/foo/bar.git"),
+        "无凭据 URL 应保留: {text}"
+    );
+    assert!(text.contains("echo done"), "普通行应保留: {text}");
+}
+
+#[test]
+fn snapshot_reconstructs_multiline_history_entries() {
+    let (dir, shim) = setup();
+    let history = [
+        ": 1700000001:0;git clone https://github.com/foo/bar.git \\\\",
+        "  ${ZSH_CUSTOM:-~/.oh-my-zsh}/custom/plugins/foo",
+        ": 1700000002:0;echo done",
+    ]
+    .join("\n");
+    let out = generate_with(dir.path(), &shim, &history, &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(
+        text.contains("git clone https://github.com/foo/bar.git"),
+        "缺多行历史首行: {text}"
+    );
+    assert!(text.contains("ZSH_CUSTOM"), "缺多行历史续行: {text}");
+}
+
+fn init_repo_with_commit_and_dirty_file(dir: &Path) {
+    let run = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} 失败", args);
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "Tester"]);
+    std::fs::write(dir.join("a.txt"), "hello\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "initial commit"]);
+    std::fs::write(dir.join("a.txt"), "hello world\n").unwrap();
+}
+
+#[test]
+fn snapshot_collects_git_status_inside_repo() {
+    let (dir, shim) = setup();
+    init_repo_with_commit_and_dirty_file(dir.path());
+    let out = generate_with(dir.path(), &shim, "", &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(text.contains("分支：main"), "缺分支: {text}");
+    assert!(text.contains("status --short"), "缺 status: {text}");
+    assert!(text.contains("initial commit"), "缺最近提交: {text}");
+    assert!(text.contains("diff --stat"), "缺 diff --stat: {text}");
+    assert!(text.contains("a.txt"), "缺变更文件: {text}");
+}
+
+#[test]
+fn snapshot_leaves_git_state_empty_outside_repo() {
+    let (dir, shim) = setup();
+    let out = generate_with(dir.path(), &shim, "", &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(!text.contains("git 状态"), "非仓库不应有 git 小节: {text}");
+    assert!(!text.contains("分支："), "非仓库不应有分支: {text}");
+}
+
+#[test]
+fn dirstack_and_tools_default_off() {
+    let (dir, shim) = setup();
+    let out = generate_with(
+        dir.path(),
+        &shim,
+        "",
+        &[
+            ("ASK_OPENCODE_DIRSTACK", "/tmp/one:/tmp/two"),
+            ("ASK_OPENCODE_TOOLS", "git,docker"),
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(!text.contains("/tmp/one"), "默认不应含 dirstack: {text}");
+    assert!(!text.contains("docker"), "默认不应含工具列表: {text}");
+}
+
+#[test]
+fn dirstack_and_tools_enabled_from_config() {
+    let (dir, shim) = setup();
+    let cfg = dir.path().join("config.json");
+    std::fs::write(&cfg, r#"{"include_dirstack":true,"include_tools":true}"#).unwrap();
+    let out = generate_with(
+        dir.path(),
+        &shim,
+        "",
+        &[
+            ("ASK_OPENCODE_CONFIG", cfg.to_str().unwrap()),
+            ("ASK_OPENCODE_DIRSTACK", "/tmp/one:/tmp/two"),
+            ("ASK_OPENCODE_TOOLS", "git,docker"),
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(text.contains("/tmp/one"), "缺 dirstack: {text}");
+    assert!(text.contains("/tmp/two"), "缺 dirstack 第二项: {text}");
+    assert!(text.contains("git, docker"), "缺工具列表: {text}");
+}
+
+#[test]
+fn dirstack_toggle_overridden_by_env() {
+    let (dir, shim) = setup();
+    let cfg = dir.path().join("config.json");
+    std::fs::write(&cfg, r#"{"include_dirstack":false}"#).unwrap();
+    let out = generate_with(
+        dir.path(),
+        &shim,
+        "",
+        &[
+            ("ASK_OPENCODE_CONFIG", cfg.to_str().unwrap()),
+            ("ASK_OPENCODE_INCLUDE_DIRSTACK", "true"),
+            ("ASK_OPENCODE_DIRSTACK", "/tmp/one"),
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(
+        text.contains("/tmp/one"),
+        "env 应覆盖文件的关闭开关: {text}"
+    );
+}
+
+#[test]
+fn sensitive_rules_extendable_from_config() {
+    let (dir, shim) = setup();
+    let cfg = dir.path().join("config.json");
+    std::fs::write(&cfg, r#"{"sensitive_rules":["MYCRED[0-9]+"]}"#).unwrap();
+    let history = [": 1700000001:0;echo MYCRED42", ": 1700000002:0;echo plain"].join("\n");
+    let out = generate_with(
+        dir.path(),
+        &shim,
+        &history,
+        &[("ASK_OPENCODE_CONFIG", cfg.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(!text.contains("MYCRED42"), "配置规则应过滤: {text}");
+    assert!(text.contains("echo plain"), "普通行应保留: {text}");
+}
+
+#[test]
+fn sensitive_rules_merged_from_env() {
+    let (dir, shim) = setup();
+    let cfg = dir.path().join("config.json");
+    std::fs::write(&cfg, r#"{"sensitive_rules":["FROMFILE"]}"#).unwrap();
+    let history = [
+        ": 1700000001:0;echo FROMFILE hit",
+        ": 1700000002:0;echo FROMENV hit",
+        ": 1700000003:0;echo keep",
+    ]
+    .join("\n");
+    let out = generate_with(
+        dir.path(),
+        &shim,
+        &history,
+        &[
+            ("ASK_OPENCODE_CONFIG", cfg.to_str().unwrap()),
+            ("ASK_OPENCODE_SENSITIVE_RULES", "FROMENV"),
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(!text.contains("FROMFILE hit"), "文件规则应生效: {text}");
+    assert!(!text.contains("FROMENV hit"), "env 规则应追加生效: {text}");
+    assert!(text.contains("echo keep"), "普通行应保留: {text}");
+}
+
+#[test]
+fn snapshot_reads_bare_format_history() {
+    let (dir, shim) = setup();
+    let history = ["ls", "# 怎么压缩这个目录", "git status", "echo done"].join("\n");
+    let out = generate_with(dir.path(), &shim, &history, &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(text.contains("- ls"), "裸命令历史应注入: {text}");
+    assert!(text.contains("- git status"), "缺 git status: {text}");
+    assert!(text.contains("- echo done"), "缺 echo done: {text}");
+    assert!(!text.contains("怎么压缩"), "仍应剔除 # 请求行: {text}");
+}
+
+#[test]
+fn history_limit_read_from_config() {
+    let (dir, shim) = setup();
+    let cfg = dir.path().join("config.json");
+    std::fs::write(&cfg, r#"{"history_limit":2}"#).unwrap();
+    let history = [
+        ": 1700000001:0;one",
+        ": 1700000002:0;two",
+        ": 1700000003:0;three",
+        ": 1700000004:0;four",
+    ]
+    .join("\n");
+    let out = generate_with(
+        dir.path(),
+        &shim,
+        &history,
+        &[("ASK_OPENCODE_CONFIG", cfg.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(
+        text.contains("- three") && text.contains("- four"),
+        "应保留最近 2 条: {text}"
+    );
+    assert!(
+        !text.contains("- one") && !text.contains("- two"),
+        "超限应截断: {text}"
+    );
+}
+
+#[test]
+fn history_limit_overridden_by_env() {
+    let (dir, shim) = setup();
+    let cfg = dir.path().join("config.json");
+    std::fs::write(&cfg, r#"{"history_limit":10}"#).unwrap();
+    let history = [
+        ": 1700000001:0;one",
+        ": 1700000002:0;two",
+        ": 1700000003:0;three",
+    ]
+    .join("\n");
+    let out = generate_with(
+        dir.path(),
+        &shim,
+        &history,
+        &[
+            ("ASK_OPENCODE_CONFIG", cfg.to_str().unwrap()),
+            ("ASK_OPENCODE_HISTORY_LIMIT", "1"),
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(text.contains("- three"), "env 应覆盖为 1 条: {text}");
+    assert!(!text.contains("- one") && !text.contains("- two"));
+}

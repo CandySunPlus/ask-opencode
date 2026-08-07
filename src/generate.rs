@@ -7,7 +7,7 @@ pub fn run(args: GenerateArgs) -> i32 {
     let config = Config::load();
     let agent = args.agent.as_deref().unwrap_or(&config.agent);
     let model = args.model.as_deref().or(config.model.as_deref());
-    let snapshot = ContextSnapshot::collect();
+    let snapshot = ContextSnapshot::collect(&config);
     let request = format!("{}\n\n请求：{}", snapshot.render(), args.request);
     match crate::opencode::invoke(&request, agent, model) {
         Ok(output) => {
