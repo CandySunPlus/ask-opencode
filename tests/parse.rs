@@ -30,6 +30,13 @@ fn parse_strips_markdown_fences() {
 }
 
 #[test]
+fn parse_drops_prose_surrounding_fenced_code() {
+    let value =
+        parse_stdin("Here is your command:\n```bash\nls -la\n```\n\n---CANDIDATE---\necho done\n");
+    assert_eq!(value, serde_json::json!(["ls -la", "echo done"]));
+}
+
+#[test]
 fn parse_trims_surrounding_blank_lines() {
     let value = parse_stdin("\n\necho hi\n\n---CANDIDATE---\n\nls\n\n");
     assert_eq!(value, serde_json::json!(["echo hi", "ls"]));

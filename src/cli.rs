@@ -30,6 +30,10 @@ pub struct GenerateArgs {
     /// 使用的 opencode agent，覆盖配置里的默认值
     #[arg(long)]
     pub agent: Option<String>,
+
+    /// 使用的模型（provider/model），覆盖配置里的默认值
+    #[arg(long)]
+    pub model: Option<String>,
 }
 
 #[derive(Args)]

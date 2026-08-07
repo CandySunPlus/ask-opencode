@@ -24,6 +24,13 @@ pub fn run_with(args: &[&str], envs: &[(&str, &str)], stdin: &str) -> Output {
     cmd.output().unwrap()
 }
 
+/// 指定工作目录后以 argv + env 黑盒驱动 ask-opencode 二进制。
+pub fn run_in_dir_with_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::cargo_bin("ask-opencode").unwrap();
+    cmd.current_dir(dir).args(args).envs(envs.iter().copied());
+    cmd.output().unwrap()
+}
+
 /// 在指定目录写一个可执行的 fake opencode shim，返回其路径。
 pub fn write_fake_opencode(dir: &Path, script: &str) -> PathBuf {
     let path = dir.join("opencode");
