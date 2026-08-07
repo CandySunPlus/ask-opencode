@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod context;
+mod filter;
 mod generate;
 mod io;
 mod opencode;
