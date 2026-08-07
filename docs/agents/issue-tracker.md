@@ -13,6 +13,10 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
+## 实现票的验收
+
+AC 的勾选权在维护者（人）手里，agent 不改 issue 里的勾选框；agent 开 PR 时在 PR 正文或评论区给出逐条「验收方法」——可复现的黑盒命令 + 预期输出——维护者核实后自行勾选并 merge 关闭。这条约定也写进 issue 模板或由 agent 在每次 PR 里执行。
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
