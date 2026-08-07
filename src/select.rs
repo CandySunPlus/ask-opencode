@@ -10,7 +10,16 @@ pub fn run(args: SelectArgs) -> i32 {
     let picker = args.picker.as_deref().unwrap_or(&config.picker);
     let fzf_bin = args.fzf_bin.as_deref().unwrap_or(&config.fzf_bin);
 
-    let candidates = args.candidates;
+    let candidates = match args.file {
+        Some(path) => match load_candidates_file(&path) {
+            Ok(candidates) => candidates,
+            Err(message) => {
+                eprintln!("select: {message}");
+                return 1;
+            }
+        },
+        None => args.candidates,
+    };
     if candidates.is_empty() {
         eprintln!("select: 没有候选命令");
         return 1;
@@ -35,6 +44,13 @@ pub fn run(args: SelectArgs) -> i32 {
 
     println!("{selected}");
     0
+}
+
+/// 从 generate 输出的 JSON 候选文件读候选列表；文件缺失或非法按错误处理。
+fn load_candidates_file(path: &str) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("无法读取候选文件 {}: {err}", path))?;
+    serde_json::from_str(&text).map_err(|err| format!("候选文件 {} 不是合法 JSON 数组: {err}", path))
 }
 
 /// 危险命令二次确认：提示打到 stderr（stdout 留给选定命令），读一行 stdin，

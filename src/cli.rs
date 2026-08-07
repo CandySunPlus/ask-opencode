@@ -54,6 +54,10 @@ pub struct ValidateArgs {
 
 #[derive(Args)]
 pub struct SelectArgs {
+    /// 从 generate 的 JSON 候选文件读候选（与逐条列出互斥，widget 用它把生成结果直接交给选择器）
+    #[arg(long, conflicts_with = "candidates")]
+    pub file: Option<String>,
+
     /// 候选命令，逐条列出（每条一个参数，多行候选也能作单条参数）
     #[arg(value_name = "CANDIDATE", allow_hyphen_values = true)]
     pub candidates: Vec<String>,
