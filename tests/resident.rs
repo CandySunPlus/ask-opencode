@@ -36,6 +36,17 @@ fn resident_envs(
     port: u16,
     resident: Option<&str>,
 ) -> Vec<(String, String)> {
+    resident_envs_with_config(dir, shim, port, resident, &dir.join("config.json"))
+}
+
+/// 同 resident_envs，但可指定 ASK_OPENCODE_CONFIG 路径（用于配置目录缺失等场景）。
+fn resident_envs_with_config(
+    dir: &Path,
+    shim: &Path,
+    port: u16,
+    resident: Option<&str>,
+    config: &Path,
+) -> Vec<(String, String)> {
     let hist = write_history(dir, "");
     let mut envs: Vec<(String, String)> = vec![
         (
@@ -44,7 +55,7 @@ fn resident_envs(
         ),
         (
             "ASK_OPENCODE_CONFIG".to_string(),
-            dir.join("config.json").to_str().unwrap().to_string(),
+            config.to_str().unwrap().to_string(),
         ),
         ("HISTFILE".to_string(), hist.to_str().unwrap().to_string()),
         ("FAKE_SERVE_PORT".to_string(), port.to_string()),
@@ -305,6 +316,35 @@ fn resident_second_request_is_faster_than_cold_start() {
     assert!(
         second_elapsed < first_elapsed / 2,
         "二次调用应显著快于冷启动：first={first_elapsed:?} second={second_elapsed:?}"
+    );
+    kill_serve(dir.path());
+}
+
+/// 配置目录不存在时也应自动创建并正常拉起 serve（回归：serve.log 打开失败曾导致常驻失效）。
+#[test]
+fn resident_creates_config_dir_when_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = write_fake_opencode(dir.path(), SHIM_RESIDENT);
+    let port = free_port();
+    // 指向一个不存在的子目录里的 config.json，模拟用户从未建过配置目录。
+    let cfg = dir.path().join("nested/deeper/config.json");
+    let envs = resident_envs_with_config(dir.path(), &shim, port, None, &cfg);
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(
+        json_stdout(&out),
+        serde_json::json!(["echo hello", "ls -la"])
+    );
+    let state = dir.path().join("nested/deeper/server.json");
+    assert!(
+        state.exists(),
+        "状态文件应落在自动创建的配置目录: {}",
+        state.display()
+    );
+    assert!(
+        dir.path().join("nested/deeper/serve.log").exists(),
+        "serve 日志应落在自动创建的配置目录"
     );
     kill_serve(dir.path());
 }
