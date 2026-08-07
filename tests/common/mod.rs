@@ -74,10 +74,31 @@ pub fn write_fake_opencode(dir: &Path, script: &str) -> PathBuf {
     path
 }
 
+/// 写一个把 argv 逐行写入日志（`@@@` 分隔、请求文本可能含换行）、stdout 回 `echo done` 的
+/// fake opencode shim，返回其路径。用于断言 opencode 收到的参数与请求内容。
+pub fn write_shim_echo_args(dir: &Path, log: &Path) -> PathBuf {
+    let script = format!(
+        "for a in \"$@\"; do printf '%s\\n@@@\\n' \"$a\"; done > \"{}\"\nprintf 'echo done\\n'",
+        log.display()
+    );
+    write_fake_opencode(dir, &script)
+}
+
 pub fn stdout_str(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 pub fn stderr_str(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// 解析 fake opencode 的 argv 日志中最后一个参数（请求文本）；日志为空返回空串。
+/// 日志格式：每条参数独占一行、以 `@@@` 行分隔（请求文本可能含换行）。
+pub fn request_from_log(log: &str) -> String {
+    let marker = "\n@@@\n";
+    let chunks: Vec<&str> = log
+        .split(marker)
+        .filter(|chunk| !chunk.is_empty())
+        .collect();
+    chunks.last().copied().unwrap_or("").trim_end().to_string()
 }
