@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -54,6 +55,10 @@ pub struct ValidateArgs {
 
 #[derive(Args)]
 pub struct SelectArgs {
+    /// 从 generate 输出的 JSON 文件读取候选命令数组
+    #[arg(long, value_name = "PATH")]
+    pub file: Option<PathBuf>,
+
     /// 候选命令，逐条列出（每条一个参数，多行候选也能作单条参数）
     #[arg(value_name = "CANDIDATE", allow_hyphen_values = true)]
     pub candidates: Vec<String>,

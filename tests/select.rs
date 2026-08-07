@@ -2,6 +2,33 @@ mod common;
 use common::*;
 use serde_json::Value;
 
+/// zsh 壳把 generate 的 JSON 候选文件交给 select，select 负责还原候选数组。
+#[test]
+fn select_reads_candidates_from_json_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let candidates = dir.path().join("candidates.json");
+    std::fs::write(&candidates, r#"["echo one","echo two"]"#).unwrap();
+    let fake_fzf = write_fake_fzf(dir.path());
+    let input_log = dir.path().join("fzf-input.log");
+    let out = run_with_env(
+        &[
+            "select",
+            "--file",
+            candidates.to_str().unwrap(),
+            "--picker",
+            "fzf",
+            "--fzf-bin",
+            fake_fzf.to_str().unwrap(),
+        ],
+        &[
+            ("FZF_SELECT", "echo two"),
+            ("FZF_INPUT_LOG", input_log.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(stdout_str(&out), "echo two\n");
+}
+
 /// 单候选：跳过选择器，直接输出该候选（不经过任何 picker）。
 #[test]
 fn select_skips_picker_for_single_candidate() {
@@ -60,7 +87,10 @@ fn select_uses_fzf_picker_for_multiple_candidates() {
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
     assert_eq!(stdout_str(&out), "echo two\n");
     let fed = std::fs::read_to_string(&input_log).unwrap();
-    assert!(fed.contains("echo one\0echo two\0"), "候选应以 NUL 分隔喂入 fzf: {fed:?}");
+    assert!(
+        fed.contains("echo one\0echo two\0"),
+        "候选应以 NUL 分隔喂入 fzf: {fed:?}"
+    );
 }
 
 /// 多条候选 + 危险命令被选中 + 确认 y：输出。
