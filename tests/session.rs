@@ -164,10 +164,7 @@ fn assert_cold_session_reuse_args(args: &str) {
         1,
         "二次请求应复用同一会话：{args}"
     );
-    assert!(
-        !args.contains("--attach"),
-        "冷启动不应带 --attach：{args}"
-    );
+    assert!(!args.contains("--attach"), "冷启动不应带 --attach：{args}");
 }
 
 /// 有落盘 id 时二次请求复用同一会话（ADR-0007）：argv 带 `--format default --session <id>`、
@@ -267,10 +264,7 @@ esac
         &shim,
         &[
             ("ASK_OPENCODE_RESIDENT", "false"),
-            (
-                "FAKE_CALL_N",
-                dir.path().join("call-n").to_str().unwrap(),
-            ),
+            ("FAKE_CALL_N", dir.path().join("call-n").to_str().unwrap()),
         ],
     );
 
@@ -496,7 +490,8 @@ fn starting_serve_preserves_persisted_session_id() {
         "serve 拉起不应抹掉已落盘的会话: {state}"
     );
     assert_eq!(
-        state["url"], format!("http://127.0.0.1:{port}"),
+        state["url"],
+        format!("http://127.0.0.1:{port}"),
         "serve 应落盘 url: {state}"
     );
     assert!(state["pid"].as_u64().is_some(), "serve 应落盘 pid: {state}");
@@ -608,6 +603,305 @@ fn request_text_invalidates_old_snapshot() {
     );
 }
 
+/// 预写一个带旧会话 id 的状态文件，模拟 serve 重启或会话被清后落盘里的失效 id。
+fn write_stale_session(dir: &Path) {
+    std::fs::write(dir.join("server.json"), r#"{"session_id":"sess-stale"}"#).unwrap();
+}
+
+/// 复用请求因会话失效失败（exit 1、stderr 含 `Session not found`，如 serve 重启后）时
+/// 自动重建（ADR-0007）：清旧 id、以 json 首次路径重跑一次本请求、落盘新 id，本次候选正常出。
+#[test]
+fn expired_session_rebuilds_via_json_first_path() {
+    let dir = tempfile::tempdir().unwrap();
+    write_stale_session(dir.path());
+    // 带旧 id 的 default 请求硬失败；json 首次路径输出含新 session id 的事件流。
+    let shim = write_fake_opencode(
+        dir.path(),
+        r#"
+for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
+if printf '%s' "$*" | grep -q -- '--format json'; then
+  printf '%s\n' '{"type":"text","sessionID":"sess-new","timestamp":1,"part":{"id":"p1","type":"text","text":"echo hello\n---CANDIDATE---\nls -la\n"}}'
+else
+  echo 'Session not found' >&2
+  exit 1
+fi
+"#,
+    );
+    let envs = session_envs(dir.path(), &shim, &[("ASK_OPENCODE_RESIDENT", "false")]);
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(
+        json_stdout(&out),
+        serde_json::json!(["echo hello", "ls -la"])
+    );
+
+    let state = read_state(dir.path());
+    assert_eq!(
+        state["session_id"], "sess-new",
+        "重建应落盘新会话 id: {state}"
+    );
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    assert_eq!(
+        args.matches("--session\n@@@\nsess-stale").count(),
+        1,
+        "旧 id 只应尝试一次：{args}"
+    );
+    assert_eq!(
+        args.matches("--format\n@@@\njson").count(),
+        1,
+        "重建应走 json 首次路径：{args}"
+    );
+}
+
+/// 只对 `Session not found` 降级（ADR-0007）：其它失败照常报错、不重试、不动状态文件。
+#[test]
+fn non_session_error_does_not_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    write_stale_session(dir.path());
+    let shim = write_fake_opencode(
+        dir.path(),
+        r#"
+for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
+echo 'boom: something else broke' >&2
+exit 1
+"#,
+    );
+    let envs = session_envs(dir.path(), &shim, &[("ASK_OPENCODE_RESIDENT", "false")]);
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr_str(&out).contains("boom: something else broke"),
+        "应回显原始错误: {}",
+        stderr_str(&out)
+    );
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    assert_eq!(
+        args.matches("--session\n@@@\nsess-stale").count(),
+        1,
+        "其它失败不应重试：{args}"
+    );
+    assert_eq!(
+        args.matches("--format\n@@@\njson").count(),
+        0,
+        "其它失败不应走 json 重建：{args}"
+    );
+
+    let state = read_state(dir.path());
+    assert_eq!(
+        state["session_id"], "sess-stale",
+        "失败不应改动状态文件: {state}"
+    );
+}
+
+/// 触发签名钉死为「退出码 1 + stderr 含该串」（ADR-0007）：退出码不对时即使 stderr 提到
+/// `Session not found` 也不降级，照常报错、不重试、不动状态文件。
+#[test]
+fn session_not_found_with_wrong_exit_code_does_not_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    write_stale_session(dir.path());
+    let shim = write_fake_opencode(
+        dir.path(),
+        r#"
+for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
+echo 'Session not found' >&2
+exit 3
+"#,
+    );
+    let envs = session_envs(dir.path(), &shim, &[("ASK_OPENCODE_RESIDENT", "false")]);
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert_eq!(out.status.code(), Some(3), "应原样透传退出码");
+    assert!(
+        stderr_str(&out).contains("Session not found"),
+        "应回显原始错误: {}",
+        stderr_str(&out)
+    );
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    assert_eq!(
+        args.matches("--format\n@@@\njson").count(),
+        0,
+        "退出码不符不应走 json 重建：{args}"
+    );
+
+    let state = read_state(dir.path());
+    assert_eq!(
+        state["session_id"], "sess-stale",
+        "不应改动状态文件: {state}"
+    );
+}
+
+/// 重建后连续第二次请求复用新落盘的 id（ADR-0007）：不再走 json、带 `--session sess-new`。
+#[test]
+fn next_request_reuses_rebuilt_session_id() {
+    let dir = tempfile::tempdir().unwrap();
+    write_stale_session(dir.path());
+    // 只认重建后的新 id，旧 id 与 json 都按场景分支。
+    let shim = write_fake_opencode(
+        dir.path(),
+        r#"
+for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
+if printf '%s' "$*" | grep -q -- '--format json'; then
+  printf '%s\n' '{"type":"text","sessionID":"sess-new","timestamp":1,"part":{"id":"p1","type":"text","text":"echo hello\n---CANDIDATE---\nls -la\n"}}'
+elif printf '%s' "$*" | grep -q -- 'sess-new'; then
+  printf 'echo hello\n---CANDIDATE---\nls -la\n'
+else
+  echo 'Session not found' >&2
+  exit 1
+fi
+"#,
+    );
+    let envs = session_envs(dir.path(), &shim, &[("ASK_OPENCODE_RESIDENT", "false")]);
+
+    let first = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(first.status.success(), "stderr: {}", stderr_str(&first));
+    assert_eq!(
+        json_stdout(&first),
+        serde_json::json!(["echo hello", "ls -la"])
+    );
+
+    let second = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(second.status.success(), "stderr: {}", stderr_str(&second));
+    assert_eq!(
+        json_stdout(&second),
+        serde_json::json!(["echo hello", "ls -la"])
+    );
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    assert_eq!(
+        args.matches("--format\n@@@\njson").count(),
+        1,
+        "只有重建那一次走 json：{args}"
+    );
+    assert_eq!(
+        args.matches("--session\n@@@\nsess-new").count(),
+        1,
+        "二次请求应复用重建的新 id：{args}"
+    );
+    assert_eq!(
+        args.matches("--session\n@@@\nsess-stale").count(),
+        1,
+        "旧 id 只应尝试一次：{args}"
+    );
+}
+
+/// 重建后第二次仍失败时报错、不无限重试（ADR-0007）：json 首次路径也失败时只重跑一次。
+#[test]
+fn rebuild_retries_only_once_then_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    write_stale_session(dir.path());
+    let shim = write_fake_opencode(
+        dir.path(),
+        r#"
+for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
+if printf '%s' "$*" | grep -q -- '--format json'; then
+  echo 'still broken' >&2
+  exit 2
+else
+  echo 'Session not found' >&2
+  exit 1
+fi
+"#,
+    );
+    let envs = session_envs(dir.path(), &shim, &[("ASK_OPENCODE_RESIDENT", "false")]);
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(!out.status.success(), "两次仍失败应报错");
+    assert!(
+        stderr_str(&out).contains("still broken"),
+        "应回显重建失败的原始错误: {}",
+        stderr_str(&out)
+    );
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    assert_eq!(
+        args.matches("--format\n@@@\njson").count(),
+        1,
+        "json 首次路径只应重试一次、不无限重试：{args}"
+    );
+    assert_eq!(
+        args.matches("--session\n@@@\nsess-stale").count(),
+        1,
+        "旧 id 只应尝试一次：{args}"
+    );
+}
+
+/// serve 模式下会话失效重建（ADR-0007）：预写一个 session_id 但没有 url 的状态文件，
+/// 首请求发现 serve 不在跑而重新拉起——模拟「serve 重启后会话失效」；重建只清 session_id、
+/// `{url, pid}` 保留，重建走 json 首次路径、仍带 `--attach`。
+#[test]
+fn expired_session_rebuild_keeps_serve_url_and_pid() {
+    let dir = tempfile::tempdir().unwrap();
+    write_stale_session(dir.path());
+    let shim = write_fake_opencode(
+        dir.path(),
+        r#"
+if [ "$1" = "serve" ]; then
+  echo serve >> "$FAKE_SERVE_COUNT"
+  echo "opencode server listening on http://127.0.0.1:$FAKE_SERVE_PORT"
+  exec nc -lk 127.0.0.1 "$FAKE_SERVE_PORT" >/dev/null 2>&1
+fi
+for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
+if printf '%s' "$*" | grep -q -- '--format json'; then
+  printf '%s\n' '{"type":"text","sessionID":"sess-new","timestamp":1,"part":{"id":"p1","type":"text","text":"echo hello\n---CANDIDATE---\nls -la\n"}}'
+else
+  echo 'Session not found' >&2
+  exit 1
+fi
+"#,
+    );
+    let port = free_port();
+    let envs = session_envs(
+        dir.path(),
+        &shim,
+        &[
+            ("ASK_OPENCODE_RESIDENT", "true"),
+            ("FAKE_SERVE_PORT", &port.to_string()),
+            (
+                "FAKE_SERVE_COUNT",
+                dir.path().join("serve-count").to_str().unwrap(),
+            ),
+        ],
+    );
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(
+        json_stdout(&out),
+        serde_json::json!(["echo hello", "ls -la"])
+    );
+
+    let state = read_state(dir.path());
+    assert_eq!(
+        state["session_id"], "sess-new",
+        "重建应落盘新会话 id: {state}"
+    );
+    assert_eq!(
+        state["url"],
+        format!("http://127.0.0.1:{port}"),
+        "重建应保留 url: {state}"
+    );
+    assert!(state["pid"].as_u64().is_some(), "重建应保留 pid: {state}");
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    let url = format!("http://127.0.0.1:{port}");
+    assert_eq!(
+        args.matches(&format!("--attach\n@@@\n{url}")).count(),
+        2,
+        "重建也应带 --attach：{args}"
+    );
+    assert_eq!(
+        args.matches("--format\n@@@\njson").count(),
+        1,
+        "重建应走 json 首次路径：{args}"
+    );
+    kill_serve(dir.path());
+}
+
 /// reset-session 只读改写状态文件，驱动它只需隔离配置路径（不调用 opencode）。
 fn reset_envs(dir: &Path) -> Vec<(String, String)> {
     vec![(
@@ -631,10 +925,7 @@ fn reset_session_clears_session_id_and_keeps_url_pid() {
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
 
     let state = read_state(dir.path());
-    assert_eq!(
-        state["url"], "http://127.0.0.1:1",
-        "url 应保留: {state}"
-    );
+    assert_eq!(state["url"], "http://127.0.0.1:1", "url 应保留: {state}");
     assert_eq!(state["pid"], 123, "pid 应保留: {state}");
     assert!(
         state.get("session_id").is_none(),
@@ -659,7 +950,10 @@ fn reset_session_is_idempotent_when_no_session_id() {
     let state = read_state(dir.path());
     assert_eq!(state["url"], "http://127.0.0.1:1", "url 应保留: {state}");
     assert_eq!(state["pid"], 123, "pid 应保留: {state}");
-    assert!(state.get("session_id").is_none(), "不应出现 session_id: {state}");
+    assert!(
+        state.get("session_id").is_none(),
+        "不应出现 session_id: {state}"
+    );
 }
 
 /// 状态文件缺失时同样成功退出、不创建文件（幂等的最空形态）。
@@ -698,7 +992,11 @@ fn reset_session_does_not_touch_running_serve() {
     ));
     envs.push((
         "FAKE_RESET_INVOKED".to_string(),
-        dir.path().join("reset-invoked").to_str().unwrap().to_string(),
+        dir.path()
+            .join("reset-invoked")
+            .to_str()
+            .unwrap()
+            .to_string(),
     ));
 
     let out = run_in_dir_owned(dir.path(), &["reset-session"], &envs);
@@ -743,10 +1041,7 @@ fi
         &shim,
         &[
             ("ASK_OPENCODE_RESIDENT", "false"),
-            (
-                "FAKE_CALL_N",
-                dir.path().join("call-n").to_str().unwrap(),
-            ),
+            ("FAKE_CALL_N", dir.path().join("call-n").to_str().unwrap()),
         ],
     );
 
