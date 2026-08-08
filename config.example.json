@@ -1,0 +1,12 @@
+{
+  "agent": "cmd-gen",
+  "model": "",
+  "history_limit": 20,
+  "include_dirstack": false,
+  "include_tools": false,
+  "sensitive_rules": ["AKIA[0-9A-Z]{16}"],
+  "picker": "skim",
+  "fzf_bin": "fzf",
+  "resident": true,
+  "reuse_session": true
+}

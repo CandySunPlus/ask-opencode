@@ -41,11 +41,12 @@ source /path/to/ask-opencode/zsh/ask-opencode.plugin.zsh
 
 ## 配置
 
-配置文件默认在 `~/.config/ask-opencode/config.json`（可用环境变量 `ASK_OPENCODE_CONFIG` 覆盖路径），全字段可选：
+配置文件默认在 `~/.config/ask-opencode/config.json`（可用环境变量 `ASK_OPENCODE_CONFIG` 覆盖路径），全字段可选；仓库里的 [`config.example.json`](config.example.json) 是全字段示例，可直接复制改名使用：
 
 ```json
 {
   "agent": "cmd-gen",
+  "model": "",
   "history_limit": 20,
   "include_dirstack": false,
   "include_tools": false,
