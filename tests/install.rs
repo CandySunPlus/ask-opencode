@@ -125,17 +125,6 @@ fn make_fixtures(s: &Sandbox) {
     .unwrap();
 }
 
-/// 计算文件 sha256（校验与安装脚本在 macOS 上一致地走 shasum -a 256）。
-fn sha256_of(path: &Path) -> String {
-    let out = Command::new("shasum").args(["-a", "256"]).arg(path).output().unwrap();
-    assert!(out.status.success());
-    String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string()
-}
-
 /// 驱动 install.sh 的完整环境：PATH 前置 stub 目录、隔离 HOME/TMPDIR、fixture 变量。
 fn envs(s: &Sandbox, extra: &[(&str, &str)]) -> Vec<(String, String)> {
     let path = format!("{}:{}", s.fake_bin.display(), std::env::var("PATH").unwrap());

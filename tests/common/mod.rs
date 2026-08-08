@@ -120,3 +120,20 @@ pub fn request_from_log(log: &str) -> String {
         .collect();
     chunks.last().copied().unwrap_or("").trim_end().to_string()
 }
+
+/// 计算文件 sha256。darwin/linux 两工具输出同形（`<hash>  <path>`），取首个字段；宿主无
+/// shasum（linux）时回退 sha256sum，保证测试在两平台都能跑。
+pub fn sha256_of(path: &Path) -> String {
+    let use_shasum = Command::new("shasum").arg("--version").output().is_ok();
+    let out = if use_shasum {
+        Command::new("shasum").args(["-a", "256"]).arg(path).output().unwrap()
+    } else {
+        Command::new("sha256sum").arg(path).output().unwrap()
+    };
+    assert!(out.status.success(), "计算 sha256 失败: {}", path.display());
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string()
+}

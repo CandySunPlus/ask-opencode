@@ -1,0 +1,67 @@
+name: release
+
+on:
+  push:
+    tags:
+      # 只处理版本 tag（如 v0.1.0），避免随意打 tag 触发正式 release。
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS x86_64 无 GitHub 托管 runner，不入矩阵（ADR-0008）。
+          - os: darwin
+            arch: aarch64
+            runner: macos-14
+          - os: linux
+            arch: x86_64
+            runner: ubuntu-24.04
+          - os: linux
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+      - name: 构建 release 二进制
+        run: cargo build --release --locked
+      - name: 打包发布资产
+        run: ./scripts/package-release.sh "${{ matrix.os }}" "${{ matrix.arch }}" "${{ github.ref_name }}" target/release/ask-opencode dist
+      - name: 上传资产
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: 创建 release 并上传资产
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 下载全部资产
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: 创建或补传 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag 已存在，补传资产"
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --title "$tag" --generate-notes
+          fi
