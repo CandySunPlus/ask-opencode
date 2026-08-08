@@ -7,7 +7,7 @@
 ## 工作方式
 
 1. 在 zsh 命令行里以 `#` 开头输入一句话请求（如 `# 查看最近的 git 提交`），按 Tab。
-2. 插件采集**上下文快照**（环境底盘、过滤后的命令历史，可选 dirstack/工具列表），在后台交给 opencode 的 cmd-gen agent 生成候选命令；生成期间 shell 不冻结，重复 Tab 被忽略。
+2. 插件采集**上下文快照**（环境底盘、过滤后的命令历史，可选 dirstack/工具列表），在后台交给 opencode 的 cmd-gen agent 生成候选命令；生成期间 shell 不冻结、可继续输入，状态行循环播放**等待动画**（spinner + 轮换文案），重复 Tab 被忽略。
 3. agent 输出 3 条**候选命令**（按分隔行契约），插件解析后先做校验：`zsh -n` 语法、首词命令存在性、git 仓库上下文。不过的自动回喂 opencode 修正一轮，仍不过则静默丢弃。
 4. 校验通过的候选进入**选择器**：多条弹内嵌 skim（可切外部 fzf），只有一条时跳过。候选是**危险命令**（`rm -rf`、`sudo`、`dd`、`curl | sh` 等）时，回填前弹 `⚠ 危险命令，确认? [y/N]`。
 5. 选中后**回填**到命令行 buffer 替换请求行，光标停在末尾，回车执行。
@@ -16,7 +16,17 @@
 
 ## 安装
 
-要求：Rust 工具链、`opencode`、zsh。
+要求：`opencode`、zsh。
+
+推荐用安装脚本（ADR-0008）从 GitHub Release 下载二进制与插件，不需要 Rust 工具链：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/CandySunPlus/ask-opencode/main/install.sh | sh
+```
+
+脚本把二进制装进 `~/.local/bin`（`-b <目录>` 可改），检测到 oh-my-zsh（`$ZSH_CUSTOM`）时按同一 tag 把插件装进 `$ZSH_CUSTOM/plugins/ask-opencode/` 并打印启用提示，否则退化为只装二进制并提示手动 source。重复安装幂等覆盖；`--uninstall` 卸载；`-V <版本>` 指定版本（默认最新 release），平台无预编译资产（如 macOS x86_64）时提示本地构建。
+
+手动构建（备选）：要求 Rust 工具链。
 
 ```sh
 cargo build --release
@@ -80,6 +90,7 @@ zsh 插件直接调用 `generate` 与 `select`，其余子命令供命令行调�
 - ADR-0005 上下文快照的采集口径
 - ADR-0006 选择器与危险确认
 - ADR-0007 常驻会话
+- ADR-0008 curl 安装与发布资产
 
 领域术语见 `CONTEXT.md`。
 
@@ -89,4 +100,4 @@ zsh 插件直接调用 `generate` 与 `select`，其余子命令供命令行调�
 cargo test
 ```
 
-测试用 `assert_cmd` 黑盒驱动二进制，默认关常驻服务与会话复用以保证冷启动路径确定性；常驻与会话路径分别在 `tests/resident.rs`、`tests/session.rs` 单独覆盖。
+测试用 `assert_cmd` 黑盒驱动二进制，默认关常驻服务与会话复用以保证冷启动路径确定性；常驻与会话路径分别在 `tests/resident.rs`、`tests/session.rs` 单独覆盖，安装脚本与发布打包分别在 `tests/install.rs`、`tests/release_package.rs` 覆盖。zsh 插件侧用 `scripts/test-plugin.py` 起 PTY 回归成功/失败/子进程早亡三径。
