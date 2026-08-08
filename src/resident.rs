@@ -179,3 +179,19 @@ pub fn save_session_id(session_id: &str) -> Result<(), OpenCodeError> {
     state.session_id = Some(session_id.to_string());
     save_state(&state_path, &state)
 }
+
+/// 清空状态文件里的会话 id、保留 serve 的 `{url, pid}`；文件缺失或无 id 时同样成功（幂等，
+/// `reset-session` 子命令，ADR-0007）。只读改写状态文件，不重拉、不杀常驻服务。
+pub fn clear_session_id() -> Result<(), OpenCodeError> {
+    let state_path = config::state_path().ok_or_else(|| OpenCodeError {
+        message: "无法确定常驻服务状态文件路径".to_string(),
+    })?;
+    if !state_path.exists() {
+        return Ok(());
+    }
+    let Some(mut state) = load_state(&state_path) else {
+        return Ok(());
+    };
+    state.session_id = None;
+    save_state(&state_path, &state)
+}
