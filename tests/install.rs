@@ -436,6 +436,12 @@ fn plugin_dir_flag_overrides_default_plugin_dir() {
         !zsh_custom.join("plugins/ask-opencode/ask-opencode.plugin.zsh").exists(),
         "不应再装进默认 $ZSH_CUSTOM 插件目录"
     );
+    // 插件没落在 omz 惯例目录，plugins 数组加载不到它，提示必须是 source 而不是 omz 启用。
+    assert!(
+        stdout_str(&out).contains("source"),
+        "插件被 --plugin-dir 移走应打印 source 提示: {}",
+        stdout_str(&out)
+    );
 }
 
 /// `--plugin-dir` 覆盖在纯 zsh（无 $ZSH_CUSTOM）下同样生效：装插件并打印 source 提示。

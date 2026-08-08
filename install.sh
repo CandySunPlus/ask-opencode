@@ -68,14 +68,15 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$bin_dir" ] || bin_dir="$HOME/.local/bin"
 
-# 插件安装目标（ADR-0008，T3 #40）：--plugin-dir 显式覆盖；否则由 $ZSH_CUSTOM 推断；
-# 两者皆无则只装二进制。$ZSH_CUSTOM 是否设置决定提示走 omz 启用还是 source。
+# 插件安装目标（ADR-0008，T3 #40）：--plugin-dir 显式覆盖，否则按 $ZSH_CUSTOM 存在与否决定。
 zsh_custom="${ZSH_CUSTOM:-}"
+omz_plugin_dir=""
+[ -n "$zsh_custom" ] && omz_plugin_dir="$zsh_custom/plugins/ask-opencode"
 install_plugin=0
 if [ -n "$plugin_dir" ]; then
   install_plugin=1
-elif [ -n "$zsh_custom" ]; then
-  plugin_dir="$zsh_custom/plugins/ask-opencode"
+elif [ -n "$omz_plugin_dir" ]; then
+  plugin_dir="$omz_plugin_dir"
   install_plugin=1
 fi
 
@@ -108,8 +109,7 @@ actual="$(verify "$tmp_dir/$asset" | sed -n '1s/[[:space:]].*$//p')"
   exit 1
 }
 
-# 插件脚本按与二进制同一 tag 从 raw 拉取（ADR-0008，T3 #40）；装进临时目录再落盘，
-# 插件下载失败时二进制还没装，不留半装状态。
+# 插件脚本在二进制落盘前拉进临时目录，失败不留半装（ADR-0008，T3 #40）。
 if [ "$install_plugin" = 1 ]; then
   plugin_url="$raw_base/$tag/zsh/ask-opencode.plugin.zsh"
   curl -fsSL -o "$tmp_dir/ask-opencode.plugin.zsh" "$plugin_url" || {
@@ -128,12 +128,15 @@ if [ "$install_plugin" = 1 ]; then
   mkdir -p "$plugin_dir"
   cp "$tmp_dir/ask-opencode.plugin.zsh" "$plugin_dir/ask-opencode.plugin.zsh"
   echo "已安装 zsh 插件到 $plugin_dir/ask-opencode.plugin.zsh"
-  if [ -n "$zsh_custom" ]; then
+  # 启用提示按插件实际落点选：plugins 数组只加载 omz 惯例目录（ADR-0008，T3 #40）。
+  if [ -n "$omz_plugin_dir" ] && [ "$plugin_dir" = "$omz_plugin_dir" ]; then
     echo "启用：在 ~/.zshrc 的 plugins=(...) 数组里加 ask-opencode"
   else
     echo "启用：在 ~/.zshrc 里 source $plugin_dir/ask-opencode.plugin.zsh"
   fi
 else
   echo "未检测到 oh-my-zsh（\$ZSH_CUSTOM 未设置），插件未安装。"
-  echo "启用：在 ~/.zshrc 里 source <(curl -fsSL $raw_base/$tag/zsh/ask-opencode.plugin.zsh)"
+  echo "启用：先取插件脚本再在 ~/.zshrc 里 source："
+  echo "  curl -fsSL $raw_base/$tag/zsh/ask-opencode.plugin.zsh -o ~/.ask-opencode.plugin.zsh"
+  echo "  echo 'source ~/.ask-opencode.plugin.zsh' >> ~/.zshrc"
 fi
