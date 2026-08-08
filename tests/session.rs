@@ -146,7 +146,8 @@ fi
     );
 }
 
-/// 有落盘 id 时二次请求不再走 json 首次路径（复用路径由 T2 接上，这里守格式不回退）。
+/// 有落盘 id 时二次请求复用同一会话（ADR-0007）：argv 带 `--format default --session <id>`、
+/// 不带 `--format json`，不重新抓 id。
 #[test]
 fn second_request_skips_json_first_path() {
     let dir = tempfile::tempdir().unwrap();
@@ -172,6 +173,122 @@ fn second_request_skips_json_first_path() {
         args.matches("--format\n@@@\njson").count(),
         1,
         "只有首次请求走 json：{args}"
+    );
+    assert_eq!(
+        args.matches("--format\n@@@\ndefault").count(),
+        1,
+        "二次请求应走 default 格式：{args}"
+    );
+    assert_eq!(
+        args.matches("--session\n@@@\nsess-abc123").count(),
+        1,
+        "二次请求应复用已落盘会话：{args}"
+    );
+}
+
+/// 校验修正轮复用主请求同一会话（ADR-0007）：主请求已落盘 id 时，修正请求带相同
+/// `--session <id>`、default 格式，不抓新 id。用调用序号 shim 区分首次/二次/修正轮。
+#[test]
+fn correction_round_reuses_same_session_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = write_fake_opencode(
+        dir.path(),
+        r#"
+n=$(cat "$FAKE_CALL_N" 2>/dev/null || printf '0')
+n=$((n+1))
+echo "$n" > "$FAKE_CALL_N"
+for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
+case "$n" in
+  1)
+    printf '%s\n' '{"type":"step_start","sessionID":"sess-abc123","timestamp":1,"part":{}}'
+    printf '%s\n' '{"type":"text","sessionID":"sess-abc123","timestamp":2,"part":{"id":"p1","type":"text","text":"echo ok\n---CANDIDATE---\nls -la\n","time":{"start":1,"end":2}}}'
+    ;;
+  2)
+    printf 'echo ok\n---CANDIDATE---\nfoobar_nonexistent_xyz\n'
+    ;;
+  3)
+    printf 'echo fixed\n'
+    ;;
+esac
+"#,
+    );
+    let envs = session_envs(
+        dir.path(),
+        &shim,
+        &[
+            ("ASK_OPENCODE_RESIDENT", "false"),
+            (
+                "FAKE_CALL_N",
+                dir.path().join("call-n").to_str().unwrap(),
+            ),
+        ],
+    );
+
+    let first = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(first.status.success(), "stderr: {}", stderr_str(&first));
+    assert_eq!(
+        json_stdout(&first),
+        serde_json::json!(["echo ok", "ls -la"])
+    );
+
+    let second = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(second.status.success(), "stderr: {}", stderr_str(&second));
+    assert_eq!(
+        json_stdout(&second),
+        serde_json::json!(["echo ok", "echo fixed"])
+    );
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    assert_eq!(
+        args.matches("--format\n@@@\njson").count(),
+        1,
+        "只有首次请求走 json：{args}"
+    );
+    assert_eq!(
+        args.matches("--session\n@@@\nsess-abc123").count(),
+        2,
+        "二次主请求与修正轮都应复用同一会话：{args}"
+    );
+}
+
+/// 首次请求（json 路径建会话）若在同一次 run 内触发修正轮，修正轮复用刚落盘的同一 id、
+/// 不抓新 id：主请求带 `--format json`，修正轮带 `--format default --session <id>`。
+#[test]
+fn correction_round_reuses_id_persisted_by_first_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = write_fake_opencode(
+        dir.path(),
+        r#"
+for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
+if printf '%s' "$*" | grep -q 修正; then
+  printf 'echo fixed\n'
+else
+  printf '%s\n' '{"type":"step_start","sessionID":"sess-abc123","timestamp":1,"part":{}}'
+  printf '%s\n' '{"type":"text","sessionID":"sess-abc123","timestamp":2,"part":{"id":"p1","type":"text","text":"foobar_nonexistent_xyz\n","time":{"start":1,"end":2}}}'
+fi
+"#,
+    );
+    let envs = session_envs(dir.path(), &shim, &[("ASK_OPENCODE_RESIDENT", "false")]);
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(json_stdout(&out), serde_json::json!(["echo fixed"]));
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    assert_eq!(
+        args.matches("--format\n@@@\njson").count(),
+        1,
+        "只有主请求走 json：{args}"
+    );
+    assert_eq!(
+        args.matches("--format\n@@@\ndefault").count(),
+        1,
+        "修正轮应走 default 格式：{args}"
+    );
+    assert_eq!(
+        args.matches("--session\n@@@\nsess-abc123").count(),
+        1,
+        "修正轮应复用刚落盘的会话：{args}"
     );
 }
 
@@ -226,6 +343,72 @@ fn first_request_in_serve_mode_keeps_url_and_pid() {
     assert_eq!(
         state["session_id"], "sess-abc123",
         "状态应落盘 session_id: {state}"
+    );
+    kill_serve(dir.path());
+}
+
+/// serve 模式二次请求：复用同一会话，argv 同时带 `--attach <url>` 与
+/// `--format default --session <id>`，serve 仍只拉起一次。
+#[test]
+fn second_request_in_serve_mode_reuses_session_with_attach() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = write_fake_opencode(dir.path(), SHIM_SESSION);
+    let port = free_port();
+    let envs = session_envs(
+        dir.path(),
+        &shim,
+        &[
+            ("ASK_OPENCODE_RESIDENT", "true"),
+            ("FAKE_SERVE_PORT", &port.to_string()),
+            (
+                "FAKE_SERVE_COUNT",
+                dir.path().join("serve-count").to_str().unwrap(),
+            ),
+        ],
+    );
+
+    let first = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(first.status.success(), "stderr: {}", stderr_str(&first));
+    assert_eq!(
+        json_stdout(&first),
+        serde_json::json!(["echo hello", "ls -la"])
+    );
+
+    let second = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(second.status.success(), "stderr: {}", stderr_str(&second));
+    assert_eq!(
+        json_stdout(&second),
+        serde_json::json!(["echo hello", "ls -la"])
+    );
+
+    let serves = std::fs::read_to_string(dir.path().join("serve-count")).unwrap();
+    assert_eq!(
+        serves.matches("serve").count(),
+        1,
+        "serve 应只拉起一次: {serves}"
+    );
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    let url = format!("http://127.0.0.1:{port}");
+    assert_eq!(
+        args.matches(&format!("--attach\n@@@\n{url}")).count(),
+        2,
+        "两次请求都应带 --attach：{args}"
+    );
+    assert_eq!(
+        args.matches("--format\n@@@\njson").count(),
+        1,
+        "只有首次请求走 json：{args}"
+    );
+    assert_eq!(
+        args.matches("--format\n@@@\ndefault").count(),
+        1,
+        "二次请求应走 default 格式：{args}"
+    );
+    assert_eq!(
+        args.matches("--session\n@@@\nsess-abc123").count(),
+        1,
+        "二次请求应复用已落盘会话：{args}"
     );
     kill_serve(dir.path());
 }
@@ -323,5 +506,54 @@ fn reuse_session_disabled_via_env_skips_json_path() {
     assert!(
         !args.contains("--session"),
         "关闭复用不应带 --session: {args}"
+    );
+}
+
+/// 关闭会话复用时即使有落盘 id 也不带 `--session`：预写状态文件模拟既存会话，
+/// 连续两次请求都回归每次新会话。
+#[test]
+fn reuse_session_disabled_ignores_persisted_session_id() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.json"), r#"{"reuse_session":false}"#).unwrap();
+    std::fs::write(
+        dir.path().join("server.json"),
+        r#"{"url":"http://127.0.0.1:1","pid":1,"session_id":"sess-stale"}"#,
+    )
+    .unwrap();
+    let shim = write_fake_opencode(dir.path(), SHIM_SESSION);
+    let envs = session_envs(dir.path(), &shim, &[("ASK_OPENCODE_RESIDENT", "false")]);
+
+    for _ in 0..2 {
+        let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+        assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+        assert_eq!(
+            json_stdout(&out),
+            serde_json::json!(["echo hello", "ls -la"])
+        );
+    }
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    assert!(
+        !args.contains("--session"),
+        "关闭复用时不带 --session：{args}"
+    );
+    assert!(!args.contains("--format"), "关闭复用不应走 json: {args}");
+}
+
+/// 请求文本尾部带「旧上下文快照作废、以本条为准」声明（ADR-0007），把快照从会话记忆剥离。
+#[test]
+fn request_text_invalidates_old_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = write_fake_opencode(dir.path(), SHIM_SESSION);
+    let envs = session_envs(dir.path(), &shim, &[("ASK_OPENCODE_RESIDENT", "false")]);
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    let request = request_from_log(&args);
+    assert!(
+        request.contains("忽略本会话历史中的旧上下文快照，以本条为准"),
+        "请求文本应含快照作废声明：{request}"
     );
 }

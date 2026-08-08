@@ -5,19 +5,37 @@ use crate::opencode::OutputFormat;
 use crate::validate::{ValidationResult, validate_candidate};
 use std::io::Write;
 
+/// ADR-0007：请求尾部这条声明是「把快照从会话记忆剥离」决策的落点。
+const SNAPSHOT_INVALIDATION: &str = "忽略本会话历史中的旧上下文快照，以本条为准";
+
+/// reuse_session 开启时读落盘的会话 id；关闭复用或没落盘返回 None（ADR-0007）。
+fn reuse_session_id(config: &Config) -> Option<String> {
+    if config.reuse_session {
+        crate::resident::load_session_id()
+    } else {
+        None
+    }
+}
+
 pub fn run(args: GenerateArgs) -> i32 {
     let config = Config::load();
     let agent = args.agent.as_deref().unwrap_or(&config.agent);
     let model = args.model.as_deref().or(config.model.as_deref());
     let snapshot = ContextSnapshot::collect(&config);
-    let request = format!("{}\n\n请求：{}", snapshot.render(), args.request);
-    // 常驻会话（ADR-0007）：无落盘 id 时走 json 首次路径抓 id，否则按 default 格式请求。
-    let format = if config.reuse_session && crate::resident::load_session_id().is_none() {
+    let request = format!(
+        "{}\n\n请求：{}\n\n{}",
+        snapshot.render(),
+        args.request,
+        SNAPSHOT_INVALIDATION
+    );
+    // 常驻会话（ADR-0007）：无落盘 id 时走 json 首次路径抓 id，否则 default 格式复用同一会话。
+    let session_id = reuse_session_id(&config);
+    let format = if config.reuse_session && session_id.is_none() {
         OutputFormat::Json
     } else {
         OutputFormat::Default
     };
-    match crate::opencode::invoke(&request, agent, model, &config, format) {
+    match crate::opencode::invoke(&request, agent, model, &config, format, session_id.as_deref()) {
         Ok(output) => {
             if !output.status.success() {
                 if !output.stderr.is_empty() {
@@ -82,9 +100,16 @@ fn correction_round(
 ) -> Vec<String> {
     let mut result = passing.to_vec();
     let fix_request = build_fix_request(failing);
-    let Ok(output) =
-        crate::opencode::invoke(&fix_request, agent, model, config, OutputFormat::Default)
-    else {
+    // 修正轮复用主请求同一常驻会话（ADR-0007）：主请求刚走 json 首次路径时 id 已落盘，这里重读。
+    let session_id = reuse_session_id(config);
+    let Ok(output) = crate::opencode::invoke(
+        &fix_request,
+        agent,
+        model,
+        config,
+        OutputFormat::Default,
+        session_id.as_deref(),
+    ) else {
         return result;
     };
     if !output.status.success() {
