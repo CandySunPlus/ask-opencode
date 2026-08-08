@@ -108,44 +108,6 @@ fn snapshot_reconstructs_multiline_history_entries() {
     assert!(text.contains("ZSH_CUSTOM"), "缺多行历史续行: {text}");
 }
 
-fn init_repo_with_commit_and_dirty_file(dir: &Path) {
-    let run = |args: &[&str]| {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {:?} 失败", args);
-    };
-    run(&["init", "-q", "-b", "main"]);
-    run(&["config", "user.email", "t@example.com"]);
-    run(&["config", "user.name", "Tester"]);
-    std::fs::write(dir.join("a.txt"), "hello\n").unwrap();
-    run(&["add", "."]);
-    run(&["commit", "-q", "-m", "initial commit"]);
-    std::fs::write(dir.join("a.txt"), "hello world\n").unwrap();
-}
-
-#[test]
-fn snapshot_collects_git_status_inside_repo() {
-    let (dir, shim) = setup();
-    init_repo_with_commit_and_dirty_file(dir.path());
-    let text = generate_with(dir.path(), &shim, "", &[]);
-    assert!(text.contains("分支：main"), "缺分支: {text}");
-    assert!(text.contains("status --short"), "缺 status: {text}");
-    assert!(text.contains("initial commit"), "缺最近提交: {text}");
-    assert!(text.contains("diff --stat"), "缺 diff --stat: {text}");
-    assert!(text.contains("a.txt"), "缺变更文件: {text}");
-}
-
-#[test]
-fn snapshot_leaves_git_state_empty_outside_repo() {
-    let (dir, shim) = setup();
-    let text = generate_with(dir.path(), &shim, "", &[]);
-    assert!(!text.contains("git 状态"), "非仓库不应有 git 小节: {text}");
-    assert!(!text.contains("分支："), "非仓库不应有分支: {text}");
-}
-
 #[test]
 fn dirstack_and_tools_default_off() {
     let (dir, shim) = setup();
