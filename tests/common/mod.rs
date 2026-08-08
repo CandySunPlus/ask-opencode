@@ -78,7 +78,8 @@ pub fn write_fake_fzf(dir: &Path) -> PathBuf {
     write_fake_bin(dir, "fzf", script)
 }
 
-fn write_fake_bin(dir: &Path, name: &str, script: &str) -> PathBuf {
+/// 写一个可执行的 stub 脚本到指定目录，返回其路径。
+pub fn write_fake_bin(dir: &Path, name: &str, script: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
     #[cfg(unix)]
