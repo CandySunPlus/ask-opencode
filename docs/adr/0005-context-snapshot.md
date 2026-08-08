@@ -6,7 +6,7 @@
 
 敏感过滤：内置黑名单（token/password/secret/api_key 等键值对、任意协议 URL 内嵌凭据、超长行）命中任一条即整行剔除；配置 `sensitive_rules` 提供扩展正则，叠加在内置规则之上，env 提供的规则再追加到文件规则之上。
 
-git 状态：`git rev-parse --is-inside-work-tree` 判定仓库内外，仓库内取分支、`status --short`、最近 commit、`diff --stat`；仓库外整节为空。
+git 状态：不采集。agent 生成候选前自行只读侦查（`git status/diff/log` 等），插件不再注入；只读侦查的权限边界见 `CONTEXT.md`「只读侦查」与 cmd-gen agent 配置。
 
 dirstack 与工具列表：默认关闭，开关 `include_dirstack`/`include_tools` 来自配置（文件 + env 覆盖）；内容由 zsh 侧经 `ASK_OPENCODE_DIRSTACK`（冒号分隔）与 `ASK_OPENCODE_TOOLS`（逗号分隔）注入。
 
