@@ -78,10 +78,14 @@ done
 
 # 插件安装目标（ADR-0008，T3 #40）：--plugin-dir 显式覆盖，否则按 oh-my-zsh 存在与否决定。
 # $ZSH_CUSTOM 是 zsh 的 shell 变量，curl|sh 子进程拿不到（env 里只有 $ZSH）；
-# 未设时回退 $ZSH/custom——omz 的惯例默认值，正好是 shell 启动后 $ZSH_CUSTOM 会指的那个目录。
+# 未设时回退 $ZSH/custom——omz 的惯例默认值；$ZSH 也未导出时再回退到 omz 标准安装目录
+# $HOME/.oh-my-zsh/custom（只要 custom 目录真实存在就认定装了 omz）。
 zsh_custom="${ZSH_CUSTOM:-}"
 if [ -z "$zsh_custom" ] && [ -n "$ZSH" ] && [ -d "$ZSH/custom" ]; then
   zsh_custom="$ZSH/custom"
+fi
+if [ -z "$zsh_custom" ] && [ -d "$HOME/.oh-my-zsh/custom" ]; then
+  zsh_custom="$HOME/.oh-my-zsh/custom"
 fi
 omz_plugin_dir=""
 [ -n "$zsh_custom" ] && omz_plugin_dir="$zsh_custom/plugins/ask-opencode"

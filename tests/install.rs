@@ -458,6 +458,30 @@ fn no_zsh_custom_but_zsh_dir_falls_back_to_omz_convention() {
     );
 }
 
+/// `$ZSH` 也未导出（curl|sh 从 zsh 起的子进程可能两个都拿不到）：只剩 omz 标准安装目录
+/// `$HOME/.oh-my-zsh/custom` 真实存在这一条信号，也应认定装了 omz 并装进惯例目录。
+#[test]
+fn home_oh_my_zsh_dir_alone_detects_omz() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+    let zsh_custom = s.home.join(".oh-my-zsh/custom");
+    fs::create_dir_all(&zsh_custom).unwrap();
+
+    let out = run_install(&s, &[], DARWIN_ARM64);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    let plugin = zsh_custom.join("plugins/ask-opencode/ask-opencode.plugin.zsh");
+    assert!(plugin.exists(), "应装入 ~/.oh-my-zsh/custom 惯例目录: {}", plugin.display());
+    assert_eq!(plugin_content(&plugin), plugin_content(&s.fixture_plugin));
+    assert!(
+        stdout_str(&out).contains("plugins=(...)"),
+        "应打印 omz 启用提示: {}",
+        stdout_str(&out)
+    );
+}
+
 /// `--plugin-dir` 覆盖插件目录：有 $ZSH_CUSTOM 时也装进覆盖目录而非默认位置。
 #[test]
 fn plugin_dir_flag_overrides_default_plugin_dir() {
