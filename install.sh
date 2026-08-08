@@ -7,7 +7,7 @@
 #
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/CandySunPlus/ask-opencode/main/install.sh | sh
-#   ./install.sh [-b <目录>] [--plugin-dir <目录>]
+#   ./install.sh [-h] [-V <版本>] [-b <目录>] [--plugin-dir <目录>] [--uninstall]
 
 set -eu
 
@@ -18,14 +18,16 @@ raw_base="https://raw.githubusercontent.com/$repo"
 
 usage() {
   cat <<'EOF'
-用法: install.sh [-h] [-b <目录>] [--plugin-dir <目录>]
+用法: install.sh [-h] [-V <版本>] [-b <目录>] [--plugin-dir <目录>] [--uninstall]
 
-把 ask-opencode 的最新发布二进制装进 binary 目录（默认 ~/.local/bin）；
-检测到 oh-my-zsh（$ZSH_CUSTOM 存在）时，把插件脚本按同一 tag 装进插件目录。
+把 ask-opencode 的发布二进制装进 binary 目录（默认 ~/.local/bin）；检测到
+oh-my-zsh（$ZSH_CUSTOM 存在）时，把插件脚本按同一 tag 装进插件目录。重复安装幂等覆盖。
 
   -h                    显示本帮助
+  -V <版本>             指定安装版本（默认最新非 prerelease，环境变量 ASK_OPENCODE_VERSION 可覆盖）
   -b <目录>             二进制目录（默认 ~/.local/bin，环境变量 ASK_OPENCODE_BIN_DIR 可覆盖）
   --plugin-dir <目录>   插件目录（默认 $ZSH_CUSTOM/plugins/ask-opencode）
+  --uninstall           删除二进制与插件目录，目标不存在也成功退出
 EOF
 }
 
@@ -53,9 +55,14 @@ map_platform() {
 
 bin_dir="${ASK_OPENCODE_BIN_DIR:-}"
 plugin_dir=""
+version="${ASK_OPENCODE_VERSION:-}"
+uninstall=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
+    -V)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      version="$2"; shift 2 ;;
     -b)
       [ "$#" -ge 2 ] || { usage; exit 2; }
       bin_dir="$2"; shift 2 ;;
@@ -63,6 +70,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { usage; exit 2; }
       plugin_dir="$2"; shift 2 ;;
     --plugin-dir=*) plugin_dir="${1#--plugin-dir=}"; shift ;;
+    --uninstall) uninstall=1; shift ;;
     *) usage; exit 2 ;;
   esac
 done
@@ -80,10 +88,34 @@ elif [ -n "$omz_plugin_dir" ]; then
   install_plugin=1
 fi
 
+# --uninstall：不碰网络，删完即退。
+if [ "$uninstall" = 1 ]; then
+  if [ -e "$bin_dir/ask-opencode" ]; then
+    rm -f "$bin_dir/ask-opencode"
+    echo "已删除 $bin_dir/ask-opencode"
+  fi
+  if [ -n "$plugin_dir" ] && [ -d "$plugin_dir" ]; then
+    rm -rf "$plugin_dir"
+    echo "已删除插件目录 $plugin_dir"
+  fi
+  echo "已卸载 ask-opencode"
+  exit 0
+fi
+
 map_platform
 
-tag="$(latest_tag)"
-[ -n "$tag" ] || { echo "install.sh: 无法获取最新版本（GitHub API 不可用）" >&2; exit 1; }
+# 版本来源：-V/ASK_OPENCODE_VERSION 显式指定即跳过 releases/latest（ADR-0008），
+# API 失败时按错误退出并提示手动传版本。
+if [ -n "$version" ]; then
+  tag="$version"
+else
+  tag="$(latest_tag)"
+  [ -n "$tag" ] || {
+    echo "install.sh: 无法获取最新版本（GitHub API 不可用）" >&2
+    echo "install.sh: 请用 -V <版本> 或环境变量 ASK_OPENCODE_VERSION 手动指定版本" >&2
+    exit 1
+  }
+fi
 
 asset="ask-opencode-$os-$arch-$tag.tar.gz"
 asset_url="$release_base/$tag/$asset"
@@ -93,7 +125,23 @@ sha_url="$asset_url.sha256"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ask-opencode-install.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-curl -fsSL -o "$tmp_dir/$asset" "$asset_url" || { echo "install.sh: 下载失败: $asset_url" >&2; exit 1; }
+# 用 -w 拿状态码而非 -f 硬退，才能区分 404 与网络错误：404 按平台无匹配资产处理（ADR-0008）。
+if ! http_code="$(curl -sSL -o "$tmp_dir/$asset" -w '%{http_code}' "$asset_url")"; then
+  http_code="${http_code:-000}"
+fi
+if [ "$http_code" != "200" ]; then
+  if [ "$http_code" = "404" ]; then
+    echo "install.sh: 平台 $os/$arch 暂无发布资产（$asset_url 返回 404）" >&2
+    if [ -n "$version" ]; then
+      echo "install.sh: 请先确认版本 $tag 正确；macOS x86_64 等无预编译资产的平台请本地构建：cargo build --release，再把 target/release/ask-opencode 放进 PATH" >&2
+    else
+      echo "install.sh: 请本地构建安装：cargo build --release，再把 target/release/ask-opencode 放进 PATH" >&2
+    fi
+    exit 1
+  fi
+  echo "install.sh: 下载失败（HTTP $http_code）: $asset_url" >&2
+  exit 1
+fi
 curl -fsSL -o "$tmp_dir/$asset.sha256" "$sha_url" || { echo "install.sh: 下载校验文件失败: $sha_url" >&2; exit 1; }
 
 # 校验工具按平台选（ADR-0008）；.sha256 取首行首个字段。

@@ -12,30 +12,40 @@ const RAW_MAIN: &str =
 /// 固定 darwin/arm64 平台信号的 uname 覆盖（macOS arm64 归一为 aarch64 的输入）。
 const DARWIN_ARM64: &[(&str, &str)] = &[("FAKE_UNAME_S", "Darwin"), ("FAKE_UNAME_M", "arm64")];
 
-/// stub curl：按 URL 分发 fixture。`-o` 写文件，否则写 stdout；每次请求的 URL 追加到
-/// `$CURL_LOG`，供断言下载顺序与资产命名契约。
+/// stub curl：按 URL 分发 fixture。`-o` 写文件，否则写 stdout；`-w` 时把 HTTP 状态码打到
+/// stdout（真实 curl 配合 -o 的行为）。每次请求的 URL 追加到 `$CURL_LOG`，供断言下载顺序与
+/// 资产命名契约。`API_STATUS`/`ASSET_STATUS`/`PLUGIN_STATUS` 可覆盖对应请求的状态码，模拟
+/// API 不可用、平台无资产、插件脚本下载失败等降级路径。
 const CURL_STUB: &str = r#"
 out=""
 url=""
+print_code=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
+    -w) print_code=1; shift 2 ;;
     -*) shift ;;
     *) url="$1"; shift ;;
   esac
 done
 echo "$url" >> "$CURL_LOG"
-emit() {
-  if [ -n "$out" ]; then cat "$1" > "$out"; else cat "$1"; fi
-}
+payload=""
+status=200
 case "$url" in
-  */releases/latest) emit "$RELEASES_JSON" ;;
-  *install.sh) emit "$FAKE_INSTALL_SCRIPT" ;;
-  *ask-opencode.plugin.zsh) emit "$FIXTURE_PLUGIN" ;;
-  *.tar.gz) emit "$FIXTURE_ASSET" ;;
-  *.sha256) emit "$FIXTURE_SHA" ;;
+  */releases/latest) payload="$RELEASES_JSON"; status="${API_STATUS:-200}" ;;
+  *install.sh) payload="$FAKE_INSTALL_SCRIPT" ;;
+  *ask-opencode.plugin.zsh) payload="$FIXTURE_PLUGIN"; status="${PLUGIN_STATUS:-200}" ;;
+  *.tar.gz) payload="$FIXTURE_ASSET"; status="${ASSET_STATUS:-200}" ;;
+  *.sha256) payload="$FIXTURE_SHA" ;;
   *) echo "unexpected url: $url" >&2; exit 1 ;;
 esac
+if [ "$status" = 200 ] && [ -n "$payload" ]; then
+  if [ -n "$out" ]; then cat "$payload" > "$out"; else cat "$payload"; fi
+elif [ -n "$out" ]; then
+  : > "$out"
+fi
+if [ "$print_code" = 1 ]; then printf '%s\n' "$status"; fi
+[ "$status" = 200 ] || exit 22
 "#;
 
 /// stub uname：`$FAKE_UNAME_S`/`$FAKE_UNAME_M` 未设时回落到真实 uname（经 /usr/bin/uname 避免递归）。
@@ -146,6 +156,10 @@ fn envs(s: &Sandbox, extra: &[(&str, &str)]) -> Vec<(String, String)> {
         ("FIXTURE_SHA".into(), s.fixture_sha.display().to_string()),
         ("FIXTURE_PLUGIN".into(), s.fixture_plugin.display().to_string()),
         ("FAKE_INSTALL_SCRIPT".into(), install_sh().display().to_string()),
+        // stub curl 的降级路径状态码默认全 200，需要故障路径的用例在 extra 里覆盖。
+        ("API_STATUS".into(), "200".into()),
+        ("ASSET_STATUS".into(), "200".into()),
+        ("PLUGIN_STATUS".into(), "200".into()),
     ];
     for (k, v) in extra {
         envs.push(((*k).into(), (*v).to_string()));
@@ -468,4 +482,277 @@ fn plugin_dir_flag_works_without_zsh_custom() {
         "无 omz 应打印 source 提示: {}",
         stdout_str(&out)
     );
+}
+
+/// `-V <版本>` 指定版本：资产与插件都按该 tag 拉取，且不再请求 releases/latest。
+#[test]
+fn v_flag_pins_version_and_skips_latest_api() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+
+    let out = run_install(&s, &["-V", "v9.9.9"], DARWIN_ARM64);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    assert!(
+        stdout_str(&out).contains("v9.9.9"),
+        "应打印指定版本: {}",
+        stdout_str(&out)
+    );
+    let log = curl_log(&s);
+    assert_eq!(log.len(), 2, "-V 指定版本应跳过 releases/latest: {log:?}");
+    assert!(
+        log[0].ends_with("ask-opencode-darwin-aarch64-v9.9.9.tar.gz"),
+        "资产 URL 应带指定版本: {log:?}"
+    );
+    assert!(log[1].ends_with(".sha256"), "{log:?}");
+    assert_tmp_empty(&s);
+}
+
+/// `ASK_OPENCODE_VERSION` 环境变量指定版本，与 `-V` 行为一致。
+#[test]
+fn ask_opencode_version_env_pins_version() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+
+    let mut extra: Vec<(&str, &str)> = vec![("ASK_OPENCODE_VERSION", "v9.9.9")];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &[], &extra);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    let log = curl_log(&s);
+    assert_eq!(log.len(), 2, "环境变量指定版本应跳过 releases/latest: {log:?}");
+    assert!(
+        log[0].ends_with("ask-opencode-darwin-aarch64-v9.9.9.tar.gz"),
+        "资产 URL 应带指定版本: {log:?}"
+    );
+    assert_tmp_empty(&s);
+}
+
+/// `-V` 与 `ASK_OPENCODE_VERSION` 同时给出：参数优先于环境变量。
+#[test]
+fn v_flag_overrides_ask_opencode_version_env() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+
+    let mut extra: Vec<(&str, &str)> = vec![("ASK_OPENCODE_VERSION", "v1.1.1")];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &["-V", "v9.9.9"], &extra);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    let log = curl_log(&s);
+    assert_eq!(log.len(), 2, "指定版本应跳过 releases/latest: {log:?}");
+    assert!(
+        log[0].ends_with("ask-opencode-darwin-aarch64-v9.9.9.tar.gz"),
+        "-V 应优先于环境变量: {log:?}"
+    );
+    assert_tmp_empty(&s);
+}
+
+/// `-V` 指定版本下插件脚本也按同一 tag 从 raw 拉取（同 tag 契约不因指定版本而断）。
+#[test]
+fn v_flag_pins_plugin_tag_too() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+    let zsh_custom = s._dir.path().join("oh-my-zsh/custom");
+
+    let mut extra: Vec<(&str, &str)> = vec![("ZSH_CUSTOM", zsh_custom.to_str().unwrap())];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &["-V", "v9.9.9"], &extra);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    let plugin = zsh_custom.join("plugins/ask-opencode/ask-opencode.plugin.zsh");
+    assert!(plugin.exists(), "应装入插件: {}", plugin.display());
+    let log = curl_log(&s);
+    assert_eq!(log.len(), 3, "应为 资产/校验/插件 三次、无 API: {log:?}");
+    assert!(
+        log[0].ends_with("ask-opencode-darwin-aarch64-v9.9.9.tar.gz"),
+        "{log:?}"
+    );
+    assert!(
+        log[2].contains("/v9.9.9/zsh/ask-opencode.plugin.zsh"),
+        "插件应按同一指定 tag 拉取: {log:?}"
+    );
+    assert_tmp_empty(&s);
+}
+
+/// 重复安装幂等覆盖：不报「已安装」，旧二进制被新内容覆盖。
+#[test]
+fn repeat_install_overwrites_idempotently() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+
+    let first = run_install(&s, &[], DARWIN_ARM64);
+    assert!(first.status.success(), "stderr: {}", stderr_str(&first));
+    let bin = s.home.join(".local/bin/ask-opencode");
+    assert_installed_bin(&bin);
+
+    // 换一份内容重新打包 fixture，重跑应覆盖旧二进制而不是报「已安装」。
+    let content = s._dir.path().join("fixture-content");
+    fs::write(content.join("ask-opencode"), "#!/bin/sh\necho v2-ask-opencode\n").unwrap();
+    let status = Command::new("tar")
+        .args(["-czf"])
+        .arg(&s.fixture_asset)
+        .arg("-C")
+        .arg(&content)
+        .arg("ask-opencode")
+        .status()
+        .unwrap();
+    assert!(status.success(), "重新打包 fixture 失败");
+    fs::write(
+        &s.fixture_sha,
+        format!(
+            "{}  ask-opencode-darwin-aarch64-{TAG}.tar.gz\n",
+            sha256_of(&s.fixture_asset)
+        ),
+    )
+    .unwrap();
+
+    let second = run_install(&s, &[], DARWIN_ARM64);
+    assert!(second.status.success(), "stderr: {}", stderr_str(&second));
+    let out = Command::new(&bin).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "v2-ask-opencode",
+        "旧二进制应被新内容覆盖"
+    );
+    assert_eq!(curl_log(&s).len(), 6, "两次安装都应走完整链路");
+    assert_tmp_empty(&s);
+}
+
+/// `--uninstall`：删二进制与插件目录、不碰网络、幂等（目标不存在也成功退出）。
+#[test]
+fn uninstall_removes_binary_and_plugin_and_is_idempotent() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+    let zsh_custom = s._dir.path().join("oh-my-zsh/custom");
+    let mut extra: Vec<(&str, &str)> = vec![("ZSH_CUSTOM", zsh_custom.to_str().unwrap())];
+    extra.extend_from_slice(DARWIN_ARM64);
+
+    let install = run_install(&s, &[], &extra);
+    assert!(install.status.success(), "stderr: {}", stderr_str(&install));
+    let bin = s.home.join(".local/bin/ask-opencode");
+    let plugin_dir = zsh_custom.join("plugins/ask-opencode");
+    assert!(bin.exists(), "安装应落盘二进制");
+    assert!(plugin_dir.join("ask-opencode.plugin.zsh").exists(), "安装应落盘插件");
+    let log_len_after_install = curl_log(&s).len();
+
+    let uninstall = run_install(&s, &["--uninstall"], &extra);
+    assert!(uninstall.status.success(), "stderr: {}", stderr_str(&uninstall));
+    assert!(!bin.exists(), "应删除二进制");
+    assert!(!plugin_dir.exists(), "应删除插件目录");
+    assert!(stdout_str(&uninstall).contains("已卸载"), "stdout: {}", stdout_str(&uninstall));
+    assert_eq!(
+        curl_log(&s).len(),
+        log_len_after_install,
+        "--uninstall 不应发起任何请求"
+    );
+
+    let again = run_install(&s, &["--uninstall"], &extra);
+    assert!(again.status.success(), "目标不存在也应成功退出: {}", stderr_str(&again));
+    assert!(!bin.exists() && !plugin_dir.exists(), "再次卸载后仍无残留");
+}
+
+/// releases/latest API 不可用：报错并提示手动传版本，非零退出、不残留。
+#[test]
+fn latest_api_failure_hints_manual_version() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+
+    let mut extra: Vec<(&str, &str)> = vec![("API_STATUS", "500")];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &[], &extra);
+    assert!(!out.status.success(), "API 失败应非零退出");
+    let err = stderr_str(&out);
+    assert!(err.contains("无法获取最新版本"), "stderr: {err}");
+    assert!(err.contains("-V"), "应提示手动传版本: {err}");
+    assert!(err.contains("ASK_OPENCODE_VERSION"), "应提示环境变量: {err}");
+    assert!(
+        !s.home.join(".local/bin/ask-opencode").exists(),
+        "API 失败不应残留二进制"
+    );
+}
+
+/// 平台无匹配资产（macOS x86_64 无 runner）：打印本地构建提示、非零退出、不装错架构。
+#[test]
+fn platform_without_asset_prints_local_build_hint() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+
+    let mut extra: Vec<(&str, &str)> = vec![("ASSET_STATUS", "404")];
+    extra.extend_from_slice(&[("FAKE_UNAME_S", "Darwin"), ("FAKE_UNAME_M", "x86_64")]);
+    let out = run_install(&s, &[], &extra);
+    assert!(!out.status.success(), "无匹配资产应非零退出");
+    let err = stderr_str(&out);
+    assert!(err.contains("暂无发布资产"), "stderr: {err}");
+    assert!(err.contains("cargo build --release"), "应提示本地构建: {err}");
+    assert!(
+        !s.home.join(".local/bin/ask-opencode").exists(),
+        "不应装错架构的二进制"
+    );
+    assert_eq!(
+        curl_log(&s)[1],
+        format!("https://github.com/CandySunPlus/ask-opencode/releases/download/v0.1.0/ask-opencode-darwin-x86_64-v0.1.0.tar.gz"),
+        "应按 x86_64 命名请求资产"
+    );
+    assert_tmp_empty(&s);
+}
+
+/// 显式 `-V` 版本号不存在（资产 404）：提示先核对版本，再给本地构建兜底，不装错东西。
+#[test]
+fn explicit_version_404_hints_version_check() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+
+    let mut extra: Vec<(&str, &str)> = vec![("ASSET_STATUS", "404")];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &["-V", "v9.9.9"], &extra);
+    assert!(!out.status.success(), "无匹配资产应非零退出");
+    let err = stderr_str(&out);
+    assert!(err.contains("请先确认版本 v9.9.9 正确"), "应提示核对版本: {err}");
+    assert!(err.contains("cargo build --release"), "仍应给本地构建提示: {err}");
+    assert!(
+        !s.home.join(".local/bin/ask-opencode").exists(),
+        "不应装错东西"
+    );
+    assert_tmp_empty(&s);
+}
+
+/// 插件脚本下载失败：整体失败、二进制不落盘、插件目录不创建（T3 引入的拉取路径）。
+#[test]
+fn plugin_download_failure_leaves_no_binary() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+    let zsh_custom = s._dir.path().join("oh-my-zsh/custom");
+
+    let mut extra: Vec<(&str, &str)> = vec![
+        ("ZSH_CUSTOM", zsh_custom.to_str().unwrap()),
+        ("PLUGIN_STATUS", "404"),
+    ];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &[], &extra);
+    assert!(!out.status.success(), "插件下载失败应非零退出");
+    assert!(stderr_str(&out).contains("插件脚本下载失败"), "stderr: {}", stderr_str(&out));
+    assert!(
+        !s.home.join(".local/bin/ask-opencode").exists(),
+        "插件失败不应残留二进制"
+    );
+    assert!(
+        !zsh_custom.join("plugins/ask-opencode").exists(),
+        "插件失败不应创建插件目录"
+    );
+    assert_tmp_empty(&s);
 }
