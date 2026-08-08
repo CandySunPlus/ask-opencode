@@ -7,6 +7,7 @@ mod io;
 mod opencode;
 mod parse;
 mod picker;
+mod reset_session;
 mod resident;
 mod select;
 mod validate;
@@ -20,6 +21,7 @@ fn main() {
         cli::Command::Parse(args) => parse::run(args),
         cli::Command::Validate(args) => validate::run(args),
         cli::Command::Select(args) => select::run(args),
+        cli::Command::ResetSession => reset_session::run(),
     };
     std::process::exit(code);
 }

@@ -351,5 +351,5 @@ fn resident_creates_config_dir_when_missing() {
         dir.path().join("nested/deeper/serve.log").exists(),
         "serve 日志应落在自动创建的配置目录"
     );
-    kill_serve(dir.path());
+    kill_serve(state.parent().unwrap());
 }
