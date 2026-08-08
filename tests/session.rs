@@ -146,6 +146,30 @@ fi
     );
 }
 
+/// 断言冷启动 argv 日志符合「一次 json 首次 + 一次 default 复用」的会话形态：
+/// json 恰一次、default 恰一次、`--session <sess-abc123>` 恰一次、不带 `--attach`。
+fn assert_cold_session_reuse_args(args: &str) {
+    assert_eq!(
+        args.matches("--format\n@@@\njson").count(),
+        1,
+        "只有首次请求走 json：{args}"
+    );
+    assert_eq!(
+        args.matches("--format\n@@@\ndefault").count(),
+        1,
+        "二次请求应走 default 格式：{args}"
+    );
+    assert_eq!(
+        args.matches("--session\n@@@\nsess-abc123").count(),
+        1,
+        "二次请求应复用同一会话：{args}"
+    );
+    assert!(
+        !args.contains("--attach"),
+        "冷启动不应带 --attach：{args}"
+    );
+}
+
 /// 有落盘 id 时二次请求复用同一会话（ADR-0007）：argv 带 `--format default --session <id>`、
 /// 不带 `--format json`，不重新抓 id。
 #[test]
@@ -169,21 +193,47 @@ fn second_request_skips_json_first_path() {
     );
 
     let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
-    assert_eq!(
-        args.matches("--format\n@@@\njson").count(),
-        1,
-        "只有首次请求走 json：{args}"
+    assert_cold_session_reuse_args(&args);
+}
+
+/// 冷启动（resident=false）会话复用回归（ADR-0007）：连续请求全程不拉起 serve、
+/// 不写 serve 日志，只复用同一个持久化 session id。
+#[test]
+fn cold_start_reuse_never_touches_serve() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = write_fake_opencode(dir.path(), SHIM_SESSION);
+    let envs = session_envs(
+        dir.path(),
+        &shim,
+        &[
+            ("ASK_OPENCODE_RESIDENT", "false"),
+            (
+                "FAKE_SERVE_COUNT",
+                dir.path().join("serve-count").to_str().unwrap(),
+            ),
+        ],
     );
+
+    let first = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(first.status.success(), "stderr: {}", stderr_str(&first));
+    let second = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(second.status.success(), "stderr: {}", stderr_str(&second));
     assert_eq!(
-        args.matches("--format\n@@@\ndefault").count(),
-        1,
-        "二次请求应走 default 格式：{args}"
+        json_stdout(&second),
+        serde_json::json!(["echo hello", "ls -la"])
     );
-    assert_eq!(
-        args.matches("--session\n@@@\nsess-abc123").count(),
-        1,
-        "二次请求应复用已落盘会话：{args}"
+
+    assert!(
+        !dir.path().join("serve-count").exists(),
+        "冷启动不应拉起 serve"
     );
+    assert!(
+        !dir.path().join("serve.log").exists(),
+        "冷启动不应写 serve 日志"
+    );
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    assert_cold_session_reuse_args(&args);
 }
 
 /// 校验修正轮复用主请求同一会话（ADR-0007）：主请求已落盘 id 时，修正请求带相同
