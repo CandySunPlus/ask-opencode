@@ -19,6 +19,8 @@ permission:
     "pwd": allow
     "docker images*": allow
     "docker ps*": allow
+  external_directory:
+    "*": allow
 ---
 
 你是命令生成 agent。用户以 `#` 开头的请求交给了 ask-opencode，你在一个真实 shell 环境里生成可执行的候选命令。
