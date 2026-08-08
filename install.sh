@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ask-opencode 安装脚本（ADR-0008）：从 GitHub Release 下载发布资产、sha256 校验后装入
-# binary 目录；插件脚本按同一 tag 从 raw 拉取装入插件目录（检测到 $ZSH_CUSTOM 时）。
+# binary 目录；插件脚本按同一 tag 从 raw 拉取装入插件目录（检测到 oh-my-zsh 时）。
 # curl|sh 与仓库内 ./install.sh 两条路径行为一致：一切信息只来自参数、环境变量与网络，
 # 不依赖脚本自身所在路径或仓库文件。
 #
@@ -21,12 +21,12 @@ usage() {
 用法: install.sh [-h] [-V <版本>] [-b <目录>] [--plugin-dir <目录>] [--uninstall]
 
 把 ask-opencode 的发布二进制装进 binary 目录（默认 ~/.local/bin）；检测到
-oh-my-zsh（$ZSH_CUSTOM 存在）时，把插件脚本按同一 tag 装进插件目录。重复安装幂等覆盖。
+oh-my-zsh（$ZSH_CUSTOM 或其惯例默认 $ZSH/custom）时，把插件脚本按同一 tag 装进插件目录。重复安装幂等覆盖。
 
   -h                    显示本帮助
   -V <版本>             指定安装版本（默认最新非 prerelease，环境变量 ASK_OPENCODE_VERSION 可覆盖）
   -b <目录>             二进制目录（默认 ~/.local/bin，环境变量 ASK_OPENCODE_BIN_DIR 可覆盖）
-  --plugin-dir <目录>   插件目录（默认 $ZSH_CUSTOM/plugins/ask-opencode）
+  --plugin-dir <目录>   插件目录（默认 $ZSH_CUSTOM/plugins/ask-opencode，$ZSH_CUSTOM 未设时取 $ZSH/custom）
   --uninstall           删除二进制与插件目录，目标不存在也成功退出
 EOF
 }
@@ -76,8 +76,13 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$bin_dir" ] || bin_dir="$HOME/.local/bin"
 
-# 插件安装目标（ADR-0008，T3 #40）：--plugin-dir 显式覆盖，否则按 $ZSH_CUSTOM 存在与否决定。
+# 插件安装目标（ADR-0008，T3 #40）：--plugin-dir 显式覆盖，否则按 oh-my-zsh 存在与否决定。
+# $ZSH_CUSTOM 是 zsh 的 shell 变量，curl|sh 子进程拿不到（env 里只有 $ZSH）；
+# 未设时回退 $ZSH/custom——omz 的惯例默认值，正好是 shell 启动后 $ZSH_CUSTOM 会指的那个目录。
 zsh_custom="${ZSH_CUSTOM:-}"
+if [ -z "$zsh_custom" ] && [ -n "$ZSH" ] && [ -d "$ZSH/custom" ]; then
+  zsh_custom="$ZSH/custom"
+fi
 omz_plugin_dir=""
 [ -n "$zsh_custom" ] && omz_plugin_dir="$zsh_custom/plugins/ask-opencode"
 install_plugin=0
@@ -183,7 +188,7 @@ if [ "$install_plugin" = 1 ]; then
     echo "启用：在 ~/.zshrc 里 source $plugin_dir/ask-opencode.plugin.zsh"
   fi
 else
-  echo "未检测到 oh-my-zsh（\$ZSH_CUSTOM 未设置），插件未安装。"
+  echo "未检测到 oh-my-zsh（\$ZSH_CUSTOM 与 \$ZSH/custom 都不可用），插件未安装。"
   echo "启用：先取插件脚本再在 ~/.zshrc 里 source："
   echo "  curl -fsSL $raw_base/$tag/zsh/ask-opencode.plugin.zsh -o ~/.ask-opencode.plugin.zsh"
   echo "  echo 'source ~/.ask-opencode.plugin.zsh' >> ~/.zshrc"

@@ -156,6 +156,9 @@ fn envs(s: &Sandbox, extra: &[(&str, &str)]) -> Vec<(String, String)> {
         ("FIXTURE_SHA".into(), s.fixture_sha.display().to_string()),
         ("FIXTURE_PLUGIN".into(), s.fixture_plugin.display().to_string()),
         ("FAKE_INSTALL_SCRIPT".into(), install_sh().display().to_string()),
+        // 隔离 $ZSH（curl|sh 下 zsh 的 omz 变量只导出 $ZSH，不导出 $ZSH_CUSTOM）：
+        // 默认空串当作无 omz，需回退路径的用例在 extra 里覆盖。
+        ("ZSH".into(), "".into()),
         // stub curl 的降级路径状态码默认全 200，需要故障路径的用例在 extra 里覆盖。
         ("API_STATUS".into(), "200".into()),
         ("ASSET_STATUS".into(), "200".into()),
@@ -422,6 +425,37 @@ fn no_zsh_custom_installs_binary_only_and_prints_source_hint() {
     let stdout = stdout_str(&out);
     assert!(stdout.contains("source"), "应打印 source 提示: {stdout}");
     assert!(stdout.contains("$ZSH_CUSTOM"), "应说明未检测到 oh-my-zsh: {stdout}");
+}
+
+/// 无 `$ZSH_CUSTOM` 但 `$ZSH/custom` 存在：curl|sh 场景——zsh 只导出 `$ZSH` 不导出
+/// `$ZSH_CUSTOM`，应回退到 omz 惯例目录 `$ZSH/custom/plugins/ask-opencode/` 装插件。
+#[test]
+fn no_zsh_custom_but_zsh_dir_falls_back_to_omz_convention() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+    let zsh_root = s._dir.path().join("oh-my-zsh");
+    let zsh_custom = zsh_root.join("custom");
+    fs::create_dir_all(&zsh_custom).unwrap();
+
+    let mut extra: Vec<(&str, &str)> = vec![("ZSH", zsh_root.to_str().unwrap())];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &[], &extra);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    let plugin = zsh_custom.join("plugins/ask-opencode/ask-opencode.plugin.zsh");
+    assert!(plugin.exists(), "应装入 $ZSH/custom 惯例目录: {}", plugin.display());
+    assert_eq!(plugin_content(&plugin), plugin_content(&s.fixture_plugin));
+    assert_tmp_empty(&s);
+
+    let log = curl_log(&s);
+    assert_eq!(log.len(), 4, "应有 API/资产/校验/插件 四次请求: {log:?}");
+    assert!(
+        stdout_str(&out).contains("plugins=(...)"),
+        "回退到惯例目录应打印 omz 启用提示: {}",
+        stdout_str(&out)
+    );
 }
 
 /// `--plugin-dir` 覆盖插件目录：有 $ZSH_CUSTOM 时也装进覆盖目录而非默认位置。

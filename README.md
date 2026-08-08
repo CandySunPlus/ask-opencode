@@ -24,7 +24,7 @@
 curl -fsSL https://raw.githubusercontent.com/CandySunPlus/ask-opencode/main/install.sh | sh
 ```
 
-脚本把二进制装进 `~/.local/bin`（`-b <目录>` 可改），检测到 oh-my-zsh（`$ZSH_CUSTOM`）时按同一 tag 把插件装进 `$ZSH_CUSTOM/plugins/ask-opencode/` 并打印启用提示，否则退化为只装二进制并提示手动 source。重复安装幂等覆盖；`--uninstall` 卸载；`-V <版本>` 指定版本（默认最新 release），平台无预编译资产（如 macOS x86_64）时提示本地构建。
+脚本把二进制装进 `~/.local/bin`（`-b <目录>` 可改），检测到 oh-my-zsh（`$ZSH_CUSTOM`，curl|sh 下回退 `$ZSH/custom`）时按同一 tag 把插件装进 `$ZSH_CUSTOM/plugins/ask-opencode/` 并打印启用提示，否则退化为只装二进制并提示手动 source。重复安装幂等覆盖；`--uninstall` 卸载；`-V <版本>` 指定版本（默认最新 release），平台无预编译资产（如 macOS x86_64）时提示本地构建。
 
 手动构建（备选）：要求 Rust 工具链。
 

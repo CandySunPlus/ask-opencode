@@ -49,7 +49,7 @@ _Avoid_: 安装包、编译产物
 _Avoid_: 安装器、installer
 
 **插件目录 (plugin directory)**:
-安装脚本装载 `ask-opencode.plugin.zsh` 的目标目录，oh-my-zsh 下为 `$ZSH_CUSTOM/plugins/ask-opencode/`。
+安装脚本装载 `ask-opencode.plugin.zsh` 的目标目录，oh-my-zsh 下为 `$ZSH_CUSTOM/plugins/ask-opencode/`；curl|sh 场景 `$ZSH_CUSTOM` 不导出，脚本回退到 `$ZSH/custom` 惯例默认。
 _Avoid_: 插件文件夹、插件位置
 
 **等待动画 (waiting animation)**:
