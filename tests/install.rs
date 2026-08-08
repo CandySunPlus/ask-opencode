@@ -31,6 +31,7 @@ emit() {
 case "$url" in
   */releases/latest) emit "$RELEASES_JSON" ;;
   *install.sh) emit "$FAKE_INSTALL_SCRIPT" ;;
+  *ask-opencode.plugin.zsh) emit "$FIXTURE_PLUGIN" ;;
   *.tar.gz) emit "$FIXTURE_ASSET" ;;
   *.sha256) emit "$FIXTURE_SHA" ;;
   *) echo "unexpected url: $url" >&2; exit 1 ;;
@@ -63,6 +64,7 @@ struct Sandbox {
     curl_log: PathBuf,
     fixture_asset: PathBuf,
     fixture_sha: PathBuf,
+    fixture_plugin: PathBuf,
     releases_json: PathBuf,
 }
 
@@ -82,6 +84,7 @@ fn setup_sandbox() -> Sandbox {
         curl_log: root.join("curl.log"),
         fixture_asset: root.join("fixture.tar.gz"),
         fixture_sha: root.join("fixture.sha256"),
+        fixture_plugin: root.join("fixture.plugin.zsh"),
         releases_json: root.join("releases.json"),
         _dir: dir,
     }
@@ -123,6 +126,11 @@ fn make_fixtures(s: &Sandbox) {
         format!("{{\"tag_name\":\"{TAG}\",\"prerelease\":false}}\n"),
     )
     .unwrap();
+    fs::write(
+        &s.fixture_plugin,
+        "#!/bin/zsh\n# fake ask-opencode zsh plugin\n",
+    )
+    .unwrap();
 }
 
 /// 驱动 install.sh 的完整环境：PATH 前置 stub 目录、隔离 HOME/TMPDIR、fixture 变量。
@@ -136,6 +144,7 @@ fn envs(s: &Sandbox, extra: &[(&str, &str)]) -> Vec<(String, String)> {
         ("RELEASES_JSON".into(), s.releases_json.display().to_string()),
         ("FIXTURE_ASSET".into(), s.fixture_asset.display().to_string()),
         ("FIXTURE_SHA".into(), s.fixture_sha.display().to_string()),
+        ("FIXTURE_PLUGIN".into(), s.fixture_plugin.display().to_string()),
         ("FAKE_INSTALL_SCRIPT".into(), install_sh().display().to_string()),
     ];
     for (k, v) in extra {
@@ -341,4 +350,122 @@ fn help_flag_prints_usage_and_exits_zero() {
     assert!(out.status.success());
     assert!(stdout_str(&out).contains("用法"), "stdout: {}", stdout_str(&out));
     assert!(curl_log(&s).is_empty(), "-h 不应发起任何请求");
+}
+
+fn plugin_content(plugin: &Path) -> String {
+    fs::read_to_string(plugin).unwrap()
+}
+
+/// 有 `$ZSH_CUSTOM`：插件按与二进制同一 tag 从 raw 拉取，落入
+/// `$ZSH_CUSTOM/plugins/ask-opencode/ask-opencode.plugin.zsh`，并打印 omz 启用提示。
+#[test]
+fn zsh_custom_present_installs_plugin_and_prints_omz_hint() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+    let zsh_custom = s._dir.path().join("oh-my-zsh/custom");
+
+    let mut extra: Vec<(&str, &str)> = vec![("ZSH_CUSTOM", zsh_custom.to_str().unwrap())];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &[], &extra);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    let plugin = zsh_custom.join("plugins/ask-opencode/ask-opencode.plugin.zsh");
+    assert!(plugin.exists(), "应装入插件目录: {}", plugin.display());
+    assert_eq!(plugin_content(&plugin), plugin_content(&s.fixture_plugin));
+    assert_tmp_empty(&s);
+
+    let log = curl_log(&s);
+    assert_eq!(log.len(), 4, "应有 API/资产/校验/插件 四次请求: {log:?}");
+    assert!(
+        log[3].contains(&format!("/{TAG}/zsh/ask-opencode.plugin.zsh")),
+        "插件应按同一 tag 从 raw 拉取: {log:?}"
+    );
+    assert!(
+        stdout_str(&out).contains("plugins=(...)"),
+        "应打印 omz 启用提示: {}",
+        stdout_str(&out)
+    );
+}
+
+/// 无 `$ZSH_CUSTOM`：只装二进制、打印 source 提示，不落插件文件。
+#[test]
+fn no_zsh_custom_installs_binary_only_and_prints_source_hint() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+
+    let out = run_install(&s, &[], DARWIN_ARM64);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    assert_eq!(curl_log(&s).len(), 3, "无 ZSH_CUSTOM 不应拉插件: {:?}", curl_log(&s));
+    assert!(
+        !s.home.join(".local/bin").join("ask-opencode.plugin.zsh").exists(),
+        "插件不应落盘"
+    );
+    let stdout = stdout_str(&out);
+    assert!(stdout.contains("source"), "应打印 source 提示: {stdout}");
+    assert!(stdout.contains("$ZSH_CUSTOM"), "应说明未检测到 oh-my-zsh: {stdout}");
+}
+
+/// `--plugin-dir` 覆盖插件目录：有 $ZSH_CUSTOM 时也装进覆盖目录而非默认位置。
+#[test]
+fn plugin_dir_flag_overrides_default_plugin_dir() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+    let zsh_custom = s._dir.path().join("oh-my-zsh/custom");
+    let custom_plugin = s._dir.path().join("my-plugins");
+
+    let mut extra: Vec<(&str, &str)> = vec![("ZSH_CUSTOM", zsh_custom.to_str().unwrap())];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(
+        &s,
+        &["--plugin-dir", custom_plugin.to_str().unwrap()],
+        &extra,
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    let overridden = custom_plugin.join("ask-opencode.plugin.zsh");
+    assert!(overridden.exists(), "应装入 --plugin-dir: {}", overridden.display());
+    assert_eq!(plugin_content(&overridden), plugin_content(&s.fixture_plugin));
+    assert!(
+        !zsh_custom.join("plugins/ask-opencode/ask-opencode.plugin.zsh").exists(),
+        "不应再装进默认 $ZSH_CUSTOM 插件目录"
+    );
+    // 插件没落在 omz 惯例目录，plugins 数组加载不到它，提示必须是 source 而不是 omz 启用。
+    assert!(
+        stdout_str(&out).contains("source"),
+        "插件被 --plugin-dir 移走应打印 source 提示: {}",
+        stdout_str(&out)
+    );
+}
+
+/// `--plugin-dir` 覆盖在纯 zsh（无 $ZSH_CUSTOM）下同样生效：装插件并打印 source 提示。
+#[test]
+fn plugin_dir_flag_works_without_zsh_custom() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+    let custom_plugin = s._dir.path().join("standalone-plugins");
+
+    let out = run_install(
+        &s,
+        &["--plugin-dir", custom_plugin.to_str().unwrap()],
+        DARWIN_ARM64,
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    let plugin = custom_plugin.join("ask-opencode.plugin.zsh");
+    assert!(plugin.exists(), "应装入 --plugin-dir: {}", plugin.display());
+    assert_eq!(plugin_content(&plugin), plugin_content(&s.fixture_plugin));
+    assert!(
+        stdout_str(&out).contains("source"),
+        "无 omz 应打印 source 提示: {}",
+        stdout_str(&out)
+    );
 }
