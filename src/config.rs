@@ -23,6 +23,8 @@ pub struct Config {
     pub fzf_bin: String,
     /// 是否启用常驻 opencode serve（ADR-0004）：首次调用自动拉起、后续 `run --attach` 复用。
     pub resident: bool,
+    /// 是否复用同一个 opencode session（ADR-0007）：默认开，关闭时每次请求开全新会话。
+    pub reuse_session: bool,
 }
 
 impl Default for Config {
@@ -37,6 +39,7 @@ impl Default for Config {
             picker: "skim".to_string(),
             fzf_bin: "fzf".to_string(),
             resident: true,
+            reuse_session: true,
         }
     }
 }
@@ -110,6 +113,11 @@ fn apply_env_overrides(config: &mut Config) {
         && let Some(on) = parse_bool(&value)
     {
         config.resident = on;
+    }
+    if let Some(value) = std::env::var_os("ASK_OPENCODE_REUSE_SESSION")
+        && let Some(on) = parse_bool(&value)
+    {
+        config.reuse_session = on;
     }
 }
 

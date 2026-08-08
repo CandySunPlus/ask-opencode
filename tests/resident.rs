@@ -75,6 +75,11 @@ fn resident_envs_with_config(
     if let Some(value) = resident {
         envs.push(("ASK_OPENCODE_RESIDENT".to_string(), value.to_string()));
     }
+    // 常驻会话路径单独在 tests/session.rs 覆盖；这里默认关，保持 serve 生命周期用例聚焦进程复用。
+    envs.push((
+        "ASK_OPENCODE_REUSE_SESSION".to_string(),
+        "false".to_string(),
+    ));
     envs
 }
 

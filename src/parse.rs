@@ -19,6 +19,49 @@ pub fn split_candidates(text: &str) -> Vec<String> {
     candidates
 }
 
+/// 从 `opencode run --format json` 事件流里解析出的内容：会话 id 与候选文本。
+/// 事件流每行一个 JSON 事件，见 ADR-0007。
+pub struct JsonEvents {
+    /// 任意事件顶层都带的 `sessionID`，取首个。
+    pub session_id: Option<String>,
+    /// `text` 事件的 `part.text` 按序拼接成的候选文本，交给 ADR-0002 解析。
+    pub text: String,
+}
+
+/// 解析 json 事件流：抓顶层 `sessionID`，把 `text` 事件（`part.text`）按序拼成文本。
+/// 拼接按 default 格式的口径补换行：每条 text 事件后跟一个换行（`opencode run` 的
+/// `part.text + EOL`），保证分隔符能独占一行。非 json 行与其它事件类型跳过。
+pub fn parse_json_events(output: &str) -> JsonEvents {
+    let mut session_id = None;
+    let mut parts = Vec::new();
+    for line in output.lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if session_id.is_none()
+            && let Some(id) = event.get("sessionID").and_then(serde_json::Value::as_str)
+        {
+            session_id = Some(id.to_string());
+        }
+        if event.get("type").and_then(serde_json::Value::as_str) == Some("text")
+            && let Some(text) = event
+                .get("part")
+                .and_then(|part| part.get("text"))
+                .and_then(serde_json::Value::as_str)
+        {
+            parts.push(text.to_string());
+        }
+    }
+    let mut text = String::new();
+    for part in &parts {
+        text.push_str(part);
+        if !part.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+    JsonEvents { session_id, text }
+}
+
 /// 把候选列表以 JSON 输出到 stdout；序列化失败（理论上不可达）返回 1。
 pub fn emit_candidates(candidates: &[String], label: &str) -> i32 {
     match serde_json::to_string(candidates) {

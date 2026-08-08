@@ -1,6 +1,7 @@
 use crate::cli::GenerateArgs;
 use crate::config::Config;
 use crate::context::ContextSnapshot;
+use crate::opencode::OutputFormat;
 use crate::validate::{ValidationResult, validate_candidate};
 use std::io::Write;
 
@@ -10,7 +11,13 @@ pub fn run(args: GenerateArgs) -> i32 {
     let model = args.model.as_deref().or(config.model.as_deref());
     let snapshot = ContextSnapshot::collect(&config);
     let request = format!("{}\n\n请求：{}", snapshot.render(), args.request);
-    match crate::opencode::invoke(&request, agent, model, &config) {
+    // 常驻会话（ADR-0007）：无落盘 id 时走 json 首次路径抓 id，否则按 default 格式请求。
+    let format = if config.reuse_session && crate::resident::load_session_id().is_none() {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Default
+    };
+    match crate::opencode::invoke(&request, agent, model, &config, format) {
         Ok(output) => {
             if !output.status.success() {
                 if !output.stderr.is_empty() {
@@ -21,7 +28,19 @@ pub fn run(args: GenerateArgs) -> i32 {
                 return output.status.code().unwrap_or(1);
             }
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let candidates = crate::parse::split_candidates(&stdout);
+            let candidates = match format {
+                OutputFormat::Json => {
+                    let events = crate::parse::parse_json_events(&stdout);
+                    if let Some(session_id) = &events.session_id
+                        && let Err(err) = crate::resident::save_session_id(session_id)
+                    {
+                        // 落盘失败不中断本次生成，stderr 提示便于诊断（ADR-0007）。
+                        eprintln!("resident: {}", err.message);
+                    }
+                    crate::parse::split_candidates(&events.text)
+                }
+                OutputFormat::Default => crate::parse::split_candidates(&stdout),
+            };
             let (passing, failing) = split_by_validation(&candidates);
             let final_candidates = if failing.is_empty() {
                 passing
@@ -63,7 +82,9 @@ fn correction_round(
 ) -> Vec<String> {
     let mut result = passing.to_vec();
     let fix_request = build_fix_request(failing);
-    let Ok(output) = crate::opencode::invoke(&fix_request, agent, model, config) else {
+    let Ok(output) =
+        crate::opencode::invoke(&fix_request, agent, model, config, OutputFormat::Default)
+    else {
         return result;
     };
     if !output.status.success() {
