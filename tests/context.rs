@@ -31,6 +31,11 @@ fn generate_with(dir: &Path, shim: &Path, history: &str, extra_env: &[(&str, &st
             "false".to_string(),
         ),
         (
+            // 常驻会话路径单独在 tests/session.rs 覆盖；这里关掉，保证快照测试沿用每次新会话。
+            "ASK_OPENCODE_REUSE_SESSION".to_string(),
+            "false".to_string(),
+        ),
+        (
             // 指向不存在的配置路径，隔离开发者真实 ~/.config/ask-opencode/config.json。
             "ASK_OPENCODE_CONFIG".to_string(),
             dir.join("no-config.json").to_str().unwrap().to_string(),
