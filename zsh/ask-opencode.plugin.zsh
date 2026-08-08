@@ -2,8 +2,8 @@
 # 加载：`source zsh/ask-opencode.plugin.zsh`（或放进插件目录）。
 # 用法：行首以 `#` 开头输入请求（整行式触发），按 Tab；后台生成候选，
 # 就绪后弹选择器（多候选）或直接进入危险确认（单候选），选中后回填替换请求行、
-# 光标停在末尾，回车执行。生成中 shell 不冻结、重复 Tab 被忽略；失败时提示错误、
-# 请求行原样保留可重试（ADR-0004）。
+# 光标停在末尾，回车执行。生成中 shell 不冻结、可继续输入，状态行循环播放等待动画
+# （后台动画进程 + 独立进度 FIFO，ADR-0004）；失败时提示错误、请求行原样保留可重试。
 
 # ask-opencode 可执行文件：默认按 PATH 解析，可用该变量覆盖
 : ${_ask_opencode_cmd:=ask-opencode}
@@ -34,7 +34,7 @@ _ask_opencode_init
 # ---- Tab 触发：整行式触发，生成中忽略重复 Tab ----
 _ask_opencode_expand() {
   if (( _ask_opencode_busy )); then
-    zle -M "正在生成…（ask-opencode）"
+    zle -M "已在生成中，请稍候…"
     return
   fi
   # 整行式触发：仅当整行以 '#' 开头（与真实命令无歧义）
@@ -61,7 +61,18 @@ _ask_opencode_start() {
   _ask_opencode_tmpdir=$tmpdir
   _ask_opencode_result="$tmpdir/result.json"
   _ask_opencode_fifo="$tmpdir/fifo"
-  mkfifo "$_ask_opencode_fifo"
+  _ask_opencode_progress_fifo="$tmpdir/progress_fifo"
+  mkfifo "$_ask_opencode_fifo" "$_ask_opencode_progress_fifo"
+
+  # 等待动画：独立进度 FIFO + 后台动画进程驱动状态行；先开读端再起动画进程（ADR-0004）
+  zmodload zsh/system 2>/dev/null
+  local pfd
+  if sysopen -r -o nonblock -u pfd "$_ask_opencode_progress_fifo" 2>/dev/null; then
+    _ask_opencode_progress_fd=$pfd
+    zle -F "$pfd" _ask_opencode_progress
+    _ask_opencode_animate "$_ask_opencode_progress_fifo" &!
+    _ask_opencode_anim_pid=$!
+  fi
 
   # 后台：候选写结果文件，退出码经 FIFO 回传（ADR-0004）。
   # 错误信息折行成单行——FIFO 信号按行读取，多行错误只留首行会截断提示
@@ -79,18 +90,71 @@ _ask_opencode_start() {
   local bg_pid=$!
 
   # 非阻塞打开 FIFO 读端并注册 handler；打不开时杀掉后台任务并复位（ADR-0004 的状态通道依赖它）
-  zmodload zsh/system 2>/dev/null
   local fd
   if sysopen -r -o nonblock -u fd "$_ask_opencode_fifo" 2>/dev/null; then
     zle -F "$fd" _ask_opencode_ready
   else
+    _ask_opencode_stop_animation
     kill "$bg_pid" 2>/dev/null
     _ask_opencode_busy=0
     zle -M "ask-opencode：无法建立通知管道"
     return
   fi
-  zle -M "正在生成…（ask-opencode）"
+  if [[ -n $_ask_opencode_progress_fd ]]; then
+    zle -M "⠋ 请求 opencode"
+  else
+    zle -M "正在生成…（ask-opencode）"
+  fi
   zle -R
+}
+
+# ---- 等待动画：后台进程循环写帧到进度 FIFO，zle -F handler 读帧刷状态行 ----
+_ask_opencode_animate() {
+  local fifo=$1
+  # 关掉继承的进度读端副本：不关的话写端永远有读端（它自己），写失败自清永不触发（ADR-0004）
+  if [[ -n ${_ask_opencode_progress_fd:-} ]]; then
+    exec {_ask_opencode_progress_fd}<&- 2>/dev/null
+  fi
+  local -a frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+  local -a msgs=("请求 opencode" "生成候选命令" "校验候选…")
+  local -i i=0
+  local wfd
+  if ! sysopen -w -o nonblock -u wfd "$fifo" 2>/dev/null; then
+    return
+  fi
+  # 删掉这个 break：读端消失后写失败不退出，动画进程会残留（ADR-0004）
+  while :; do
+    print -r -- "$frames[$(( i % ${#frames} + 1 ))] ${msgs[$(( (i / 8) % ${#msgs} + 1 ))]}" >&$wfd 2>/dev/null || break
+    sleep 0.1
+    (( i++ ))
+  done
+}
+
+# zle -F handler：读一个帧，只刷状态行消息（ADR-0004 的 handler 不碰终端约束）
+_ask_opencode_progress() {
+  local fd=$1 frame
+  if read -r frame <&$fd 2>/dev/null && [[ -n $frame ]]; then
+    zle -M "$frame"
+  fi
+}
+
+# 完成/失败收尾：杀动画进程、摘进度 handler、关进度 FIFO 读端
+_ask_opencode_stop_animation() {
+  if [[ -n $_ask_opencode_anim_pid ]]; then
+    kill "$_ask_opencode_anim_pid" 2>/dev/null
+    _ask_opencode_anim_pid=
+  fi
+  if [[ -n $_ask_opencode_progress_fd ]]; then
+    zle -F "$_ask_opencode_progress_fd" 2>/dev/null
+    exec {_ask_opencode_progress_fd}<&- 2>/dev/null
+    _ask_opencode_progress_fd=
+  fi
+}
+
+# 收尾：删本次请求的临时目录（FIFO/结果/错误日志都在里面）
+_ask_opencode_cleanup() {
+  [[ -n $_ask_opencode_tmpdir ]] && rm -rf "$_ask_opencode_tmpdir"
+  _ask_opencode_tmpdir=
 }
 
 # ---- 完成通知（zle -F handler）：不碰终端，只备好状态并转调回填 widget ----
@@ -103,6 +167,7 @@ _ask_opencode_ready() {
     exec {fd}<&- 2>/dev/null
     return
   fi
+  _ask_opencode_stop_animation
   local sig
   # 排空 FIFO 并取信号：可能整行「OK」或「ERR …」
   if read -r sig <&$fd 2>/dev/null; then
@@ -118,6 +183,7 @@ _ask_opencode_ready() {
     zle _ask_opencode_fill
   else
     _ask_opencode_busy=0
+    _ask_opencode_cleanup
     zle -M "${sig#ERR }（请求行保留，可再按 Tab 重试）"
   fi
 }
@@ -129,13 +195,12 @@ _ask_opencode_fill() {
   fi
   _ask_opencode_ready=0
   _ask_opencode_busy=0
-  local tmpdir=$_ask_opencode_tmpdir
 
   # 候选全被校验丢弃时 generate 输出空数组，select 会以「没有候选命令」报错退出；
   # 提前识别，给用户「无可用候选」而非系统故障的提示
   if [[ $(<"$_ask_opencode_result") == '[]' ]]; then
     zle -M "没有可运行的候选，请求行保留，可换一种说法再试"
-    rm -rf "$tmpdir"
+    _ask_opencode_cleanup
     return
   fi
 
@@ -156,5 +221,5 @@ _ask_opencode_fill() {
   fi
   zle -R
 
-  rm -rf "$tmpdir"
+  _ask_opencode_cleanup
 }
