@@ -1,13 +1,14 @@
 #!/bin/sh
 #
 # ask-opencode 安装脚本（ADR-0008）：从 GitHub Release 下载发布资产、sha256 校验后装入
-# binary 目录；插件脚本按同一 tag 从 raw 拉取装入插件目录（检测到 oh-my-zsh 时）。
+# binary 目录；插件脚本与 cmd-gen agent 按同一 tag 从 raw 拉取，分别装入插件目录
+# （检测到 oh-my-zsh 时）与 opencode 全局 agents 目录。
 # curl|sh 与仓库内 ./install.sh 两条路径行为一致：一切信息只来自参数、环境变量与网络，
 # 不依赖脚本自身所在路径或仓库文件。
 #
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/CandySunPlus/ask-opencode/main/install.sh | sh
-#   ./install.sh [-h] [-V <版本>] [-b <目录>] [--plugin-dir <目录>] [--uninstall]
+#   ./install.sh [-h] [-V <版本>] [-b <目录>] [--plugin-dir <目录>] [--agent-dir <目录>] [--uninstall]
 
 set -eu
 
@@ -18,16 +19,18 @@ raw_base="https://raw.githubusercontent.com/$repo"
 
 usage() {
   cat <<'EOF'
-用法: install.sh [-h] [-V <版本>] [-b <目录>] [--plugin-dir <目录>] [--uninstall]
+用法: install.sh [-h] [-V <版本>] [-b <目录>] [--plugin-dir <目录>] [--agent-dir <目录>] [--uninstall]
 
-把 ask-opencode 的发布二进制装进 binary 目录（默认 ~/.local/bin）；检测到
-oh-my-zsh（$ZSH_CUSTOM 或其惯例默认 $ZSH/custom）时，把插件脚本按同一 tag 装进插件目录。重复安装幂等覆盖。
+把 ask-opencode 的发布二进制装进 binary 目录（默认 ~/.local/bin）；把 cmd-gen agent 按同一
+tag 装进 opencode 全局 agents 目录（默认 ~/.config/opencode/agents）；检测到 oh-my-zsh
+（$ZSH_CUSTOM 或其惯例默认 $ZSH/custom）时，把插件脚本按同一 tag 装进插件目录。重复安装幂等覆盖。
 
   -h                    显示本帮助
   -V <版本>             指定安装版本（默认最新非 prerelease，环境变量 ASK_OPENCODE_VERSION 可覆盖）
   -b <目录>             二进制目录（默认 ~/.local/bin，环境变量 ASK_OPENCODE_BIN_DIR 可覆盖）
   --plugin-dir <目录>   插件目录（默认 $ZSH_CUSTOM/plugins/ask-opencode，$ZSH_CUSTOM 未设时取 $ZSH/custom）
-  --uninstall           删除二进制与插件目录，目标不存在也成功退出
+  --agent-dir <目录>    cmd-gen agent 目录（默认 ~/.config/opencode/agents，环境变量 ASK_OPENCODE_AGENT_DIR 可覆盖）
+  --uninstall           删除二进制、插件目录与 agent 文件，目标不存在也成功退出
 EOF
 }
 
@@ -55,6 +58,7 @@ map_platform() {
 
 bin_dir="${ASK_OPENCODE_BIN_DIR:-}"
 plugin_dir=""
+agent_dir="${ASK_OPENCODE_AGENT_DIR:-}"
 version="${ASK_OPENCODE_VERSION:-}"
 uninstall=0
 while [ "$#" -gt 0 ]; do
@@ -70,11 +74,17 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { usage; exit 2; }
       plugin_dir="$2"; shift 2 ;;
     --plugin-dir=*) plugin_dir="${1#--plugin-dir=}"; shift ;;
+    --agent-dir)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      agent_dir="$2"; shift 2 ;;
+    --agent-dir=*) agent_dir="${1#--agent-dir=}"; shift ;;
     --uninstall) uninstall=1; shift ;;
     *) usage; exit 2 ;;
   esac
 done
 [ -n "$bin_dir" ] || bin_dir="$HOME/.local/bin"
+# cmd-gen agent 是 generate 的默认 agent，缺了装完不能用，故必装（ADR-0008）。
+[ -n "$agent_dir" ] || agent_dir="$HOME/.config/opencode/agents"
 
 # 插件安装目标（ADR-0008，T3 #40）：--plugin-dir 显式覆盖，否则按 oh-my-zsh 存在与否决定。
 # $ZSH_CUSTOM 是 zsh 的 shell 变量，curl|sh 子进程拿不到（env 里只有 $ZSH）；
@@ -106,6 +116,10 @@ if [ "$uninstall" = 1 ]; then
   if [ -n "$plugin_dir" ] && [ -d "$plugin_dir" ]; then
     rm -rf "$plugin_dir"
     echo "已删除插件目录 $plugin_dir"
+  fi
+  if [ -e "$agent_dir/cmd-gen.md" ]; then
+    rm -f "$agent_dir/cmd-gen.md"
+    echo "已删除 agent $agent_dir/cmd-gen.md"
   fi
   echo "已卸载 ask-opencode"
   exit 0
@@ -175,11 +189,21 @@ if [ "$install_plugin" = 1 ]; then
   }
 fi
 
+# cmd-gen agent 与插件同一 tag 契约：从 raw 拉取，失败即整体失败，不留半装（ADR-0008）。
+agent_url="$raw_base/$tag/.opencode/agents/cmd-gen.md"
+curl -fsSL -o "$tmp_dir/cmd-gen.md" "$agent_url" || {
+  echo "install.sh: cmd-gen agent 下载失败: $agent_url" >&2
+  exit 1
+}
+
 tar -xzf "$tmp_dir/$asset" -C "$tmp_dir"
 mkdir -p "$bin_dir"
 install -m 0755 "$tmp_dir/ask-opencode" "$bin_dir/ask-opencode"
-
 echo "已安装 ask-opencode $tag 到 $bin_dir/ask-opencode"
+
+mkdir -p "$agent_dir"
+install -m 0644 "$tmp_dir/cmd-gen.md" "$agent_dir/cmd-gen.md"
+echo "已安装 cmd-gen agent 到 $agent_dir/cmd-gen.md"
 
 if [ "$install_plugin" = 1 ]; then
   mkdir -p "$plugin_dir"

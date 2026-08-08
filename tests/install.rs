@@ -14,8 +14,8 @@ const DARWIN_ARM64: &[(&str, &str)] = &[("FAKE_UNAME_S", "Darwin"), ("FAKE_UNAME
 
 /// stub curl：按 URL 分发 fixture。`-o` 写文件，否则写 stdout；`-w` 时把 HTTP 状态码打到
 /// stdout（真实 curl 配合 -o 的行为）。每次请求的 URL 追加到 `$CURL_LOG`，供断言下载顺序与
-/// 资产命名契约。`API_STATUS`/`ASSET_STATUS`/`PLUGIN_STATUS` 可覆盖对应请求的状态码，模拟
-/// API 不可用、平台无资产、插件脚本下载失败等降级路径。
+/// 资产命名契约。`API_STATUS`/`ASSET_STATUS`/`PLUGIN_STATUS`/`AGENT_STATUS` 可覆盖对应请求的
+/// 状态码，模拟 API 不可用、平台无资产、插件脚本下载失败等降级路径。
 const CURL_STUB: &str = r#"
 out=""
 url=""
@@ -35,6 +35,7 @@ case "$url" in
   */releases/latest) payload="$RELEASES_JSON"; status="${API_STATUS:-200}" ;;
   *install.sh) payload="$FAKE_INSTALL_SCRIPT" ;;
   *ask-opencode.plugin.zsh) payload="$FIXTURE_PLUGIN"; status="${PLUGIN_STATUS:-200}" ;;
+  *cmd-gen.md) payload="$FIXTURE_AGENT"; status="${AGENT_STATUS:-200}" ;;
   *.tar.gz) payload="$FIXTURE_ASSET"; status="${ASSET_STATUS:-200}" ;;
   *.sha256) payload="$FIXTURE_SHA" ;;
   *) echo "unexpected url: $url" >&2; exit 1 ;;
@@ -75,6 +76,7 @@ struct Sandbox {
     fixture_asset: PathBuf,
     fixture_sha: PathBuf,
     fixture_plugin: PathBuf,
+    fixture_agent: PathBuf,
     releases_json: PathBuf,
 }
 
@@ -95,6 +97,7 @@ fn setup_sandbox() -> Sandbox {
         fixture_asset: root.join("fixture.tar.gz"),
         fixture_sha: root.join("fixture.sha256"),
         fixture_plugin: root.join("fixture.plugin.zsh"),
+        fixture_agent: root.join("fixture.cmd-gen.md"),
         releases_json: root.join("releases.json"),
         _dir: dir,
     }
@@ -141,6 +144,11 @@ fn make_fixtures(s: &Sandbox) {
         "#!/bin/zsh\n# fake ask-opencode zsh plugin\n",
     )
     .unwrap();
+    fs::write(
+        &s.fixture_agent,
+        "---\ndescription: fake cmd-gen agent\n---\nfake agent body\n",
+    )
+    .unwrap();
 }
 
 /// 驱动 install.sh 的完整环境：PATH 前置 stub 目录、隔离 HOME/TMPDIR、fixture 变量。
@@ -155,6 +163,7 @@ fn envs(s: &Sandbox, extra: &[(&str, &str)]) -> Vec<(String, String)> {
         ("FIXTURE_ASSET".into(), s.fixture_asset.display().to_string()),
         ("FIXTURE_SHA".into(), s.fixture_sha.display().to_string()),
         ("FIXTURE_PLUGIN".into(), s.fixture_plugin.display().to_string()),
+        ("FIXTURE_AGENT".into(), s.fixture_agent.display().to_string()),
         ("FAKE_INSTALL_SCRIPT".into(), install_sh().display().to_string()),
         // 隔离 $ZSH（curl|sh 下 zsh 的 omz 变量只导出 $ZSH，不导出 $ZSH_CUSTOM）：
         // 默认空串当作无 omz，需回退路径的用例在 extra 里覆盖。
@@ -163,6 +172,7 @@ fn envs(s: &Sandbox, extra: &[(&str, &str)]) -> Vec<(String, String)> {
         ("API_STATUS".into(), "200".into()),
         ("ASSET_STATUS".into(), "200".into()),
         ("PLUGIN_STATUS".into(), "200".into()),
+        ("AGENT_STATUS".into(), "200".into()),
     ];
     for (k, v) in extra {
         envs.push(((*k).into(), (*v).to_string()));
@@ -233,14 +243,26 @@ fn installs_latest_with_download_verify_install_cleanup() {
     assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
     assert_tmp_empty(&s);
 
+    let agent = s.home.join(".config/opencode/agents/cmd-gen.md");
+    assert!(agent.exists(), "应装入 agent: {}", agent.display());
+    assert_eq!(
+        fs::read_to_string(&agent).unwrap(),
+        fs::read_to_string(&s.fixture_agent).unwrap(),
+        "agent 内容应与 fixture 一致"
+    );
+
     let log = curl_log(&s);
-    assert_eq!(log.len(), 3, "应有 API/资产/校验 三次请求: {log:?}");
+    assert_eq!(log.len(), 4, "应有 API/资产/校验/agent 四次请求: {log:?}");
     assert!(log[0].ends_with("/releases/latest"), "{log:?}");
     assert!(
         log[1].ends_with(&format!("ask-opencode-darwin-aarch64-{TAG}.tar.gz")),
         "资产 URL 应带归一化的 aarch64: {log:?}"
     );
     assert!(log[2].ends_with(".sha256"), "{log:?}");
+    assert!(
+        log[3].contains(&format!("/{TAG}/.opencode/agents/cmd-gen.md")),
+        "agent 应按同一 tag 从 raw 拉取: {log:?}"
+    );
 }
 
 /// 直接跑与 curl|sh 两条路径装出同一结果。
@@ -347,7 +369,7 @@ fn uname_mapping_arm64_normalizes_aarch64_and_keeps_x86_64() {
             stderr_str(&out)
         );
         let log = curl_log(&s);
-        assert_eq!(log.len(), 3, "{uname_s}/{uname_m}: {log:?}");
+        assert_eq!(log.len(), 4, "{uname_s}/{uname_m}: {log:?}");
         assert!(
             log[1].ends_with(&format!("ask-opencode-{want_os}-{want_arch}-{TAG}.tar.gz")),
             "{uname_s}/{uname_m} 应请求 {want_os}/{want_arch} 资产，实际: {log:?}"
@@ -394,10 +416,14 @@ fn zsh_custom_present_installs_plugin_and_prints_omz_hint() {
     assert_tmp_empty(&s);
 
     let log = curl_log(&s);
-    assert_eq!(log.len(), 4, "应有 API/资产/校验/插件 四次请求: {log:?}");
+    assert_eq!(log.len(), 5, "应有 API/资产/校验/插件/agent 五次请求: {log:?}");
     assert!(
         log[3].contains(&format!("/{TAG}/zsh/ask-opencode.plugin.zsh")),
         "插件应按同一 tag 从 raw 拉取: {log:?}"
+    );
+    assert!(
+        log[4].contains(&format!("/{TAG}/.opencode/agents/cmd-gen.md")),
+        "agent 应按同一 tag 从 raw 拉取: {log:?}"
     );
     assert!(
         stdout_str(&out).contains("plugins=(...)"),
@@ -417,7 +443,12 @@ fn no_zsh_custom_installs_binary_only_and_prints_source_hint() {
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
 
     assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
-    assert_eq!(curl_log(&s).len(), 3, "无 ZSH_CUSTOM 不应拉插件: {:?}", curl_log(&s));
+    let log = curl_log(&s);
+    assert_eq!(log.len(), 4, "无 ZSH_CUSTOM 应 API/资产/校验/agent，不拉插件: {log:?}");
+    assert!(
+        !log.iter().any(|u| u.contains("ask-opencode.plugin.zsh")),
+        "无 omz 不应拉插件: {log:?}"
+    );
     assert!(
         !s.home.join(".local/bin").join("ask-opencode.plugin.zsh").exists(),
         "插件不应落盘"
@@ -450,7 +481,7 @@ fn no_zsh_custom_but_zsh_dir_falls_back_to_omz_convention() {
     assert_tmp_empty(&s);
 
     let log = curl_log(&s);
-    assert_eq!(log.len(), 4, "应有 API/资产/校验/插件 四次请求: {log:?}");
+    assert_eq!(log.len(), 5, "应有 API/资产/校验/agent/插件 五次请求: {log:?}");
     assert!(
         stdout_str(&out).contains("plugins=(...)"),
         "回退到惯例目录应打印 omz 启用提示: {}",
@@ -559,12 +590,16 @@ fn v_flag_pins_version_and_skips_latest_api() {
         stdout_str(&out)
     );
     let log = curl_log(&s);
-    assert_eq!(log.len(), 2, "-V 指定版本应跳过 releases/latest: {log:?}");
+    assert_eq!(log.len(), 3, "-V 指定版本应跳过 releases/latest（资产/校验/agent）: {log:?}");
     assert!(
         log[0].ends_with("ask-opencode-darwin-aarch64-v9.9.9.tar.gz"),
         "资产 URL 应带指定版本: {log:?}"
     );
     assert!(log[1].ends_with(".sha256"), "{log:?}");
+    assert!(
+        log[2].contains("/v9.9.9/.opencode/agents/cmd-gen.md"),
+        "agent 应按同一指定 tag 拉取: {log:?}"
+    );
     assert_tmp_empty(&s);
 }
 
@@ -582,11 +617,12 @@ fn ask_opencode_version_env_pins_version() {
 
     assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
     let log = curl_log(&s);
-    assert_eq!(log.len(), 2, "环境变量指定版本应跳过 releases/latest: {log:?}");
+    assert_eq!(log.len(), 3, "环境变量指定版本应跳过 releases/latest: {log:?}");
     assert!(
         log[0].ends_with("ask-opencode-darwin-aarch64-v9.9.9.tar.gz"),
         "资产 URL 应带指定版本: {log:?}"
     );
+    assert!(log[2].contains("/v9.9.9/.opencode/agents/cmd-gen.md"), "{log:?}");
     assert_tmp_empty(&s);
 }
 
@@ -604,15 +640,16 @@ fn v_flag_overrides_ask_opencode_version_env() {
 
     assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
     let log = curl_log(&s);
-    assert_eq!(log.len(), 2, "指定版本应跳过 releases/latest: {log:?}");
+    assert_eq!(log.len(), 3, "指定版本应跳过 releases/latest: {log:?}");
     assert!(
         log[0].ends_with("ask-opencode-darwin-aarch64-v9.9.9.tar.gz"),
         "-V 应优先于环境变量: {log:?}"
     );
+    assert!(log[2].contains("/v9.9.9/.opencode/agents/cmd-gen.md"), "{log:?}");
     assert_tmp_empty(&s);
 }
 
-/// `-V` 指定版本下插件脚本也按同一 tag 从 raw 拉取（同 tag 契约不因指定版本而断）。
+/// `-V` 指定版本下插件脚本与 agent 也按同一 tag 从 raw 拉取（同 tag 契约不因指定版本而断）。
 #[test]
 fn v_flag_pins_plugin_tag_too() {
     let s = setup_sandbox();
@@ -629,7 +666,7 @@ fn v_flag_pins_plugin_tag_too() {
     let plugin = zsh_custom.join("plugins/ask-opencode/ask-opencode.plugin.zsh");
     assert!(plugin.exists(), "应装入插件: {}", plugin.display());
     let log = curl_log(&s);
-    assert_eq!(log.len(), 3, "应为 资产/校验/插件 三次、无 API: {log:?}");
+    assert_eq!(log.len(), 4, "应为 资产/校验/agent/插件 四次、无 API: {log:?}");
     assert!(
         log[0].ends_with("ask-opencode-darwin-aarch64-v9.9.9.tar.gz"),
         "{log:?}"
@@ -637,6 +674,10 @@ fn v_flag_pins_plugin_tag_too() {
     assert!(
         log[2].contains("/v9.9.9/zsh/ask-opencode.plugin.zsh"),
         "插件应按同一指定 tag 拉取: {log:?}"
+    );
+    assert!(
+        log[3].contains("/v9.9.9/.opencode/agents/cmd-gen.md"),
+        "agent 应按同一指定 tag 拉取: {log:?}"
     );
     assert_tmp_empty(&s);
 }
@@ -682,7 +723,7 @@ fn repeat_install_overwrites_idempotently() {
         "v2-ask-opencode",
         "旧二进制应被新内容覆盖"
     );
-    assert_eq!(curl_log(&s).len(), 6, "两次安装都应走完整链路");
+    assert_eq!(curl_log(&s).len(), 8, "两次安装都应走完整链路（各 4 次请求）");
     assert_tmp_empty(&s);
 }
 
@@ -700,14 +741,17 @@ fn uninstall_removes_binary_and_plugin_and_is_idempotent() {
     assert!(install.status.success(), "stderr: {}", stderr_str(&install));
     let bin = s.home.join(".local/bin/ask-opencode");
     let plugin_dir = zsh_custom.join("plugins/ask-opencode");
+    let agent_file = s.home.join(".config/opencode/agents/cmd-gen.md");
     assert!(bin.exists(), "安装应落盘二进制");
     assert!(plugin_dir.join("ask-opencode.plugin.zsh").exists(), "安装应落盘插件");
+    assert!(agent_file.exists(), "安装应落盘 agent");
     let log_len_after_install = curl_log(&s).len();
 
     let uninstall = run_install(&s, &["--uninstall"], &extra);
     assert!(uninstall.status.success(), "stderr: {}", stderr_str(&uninstall));
     assert!(!bin.exists(), "应删除二进制");
     assert!(!plugin_dir.exists(), "应删除插件目录");
+    assert!(!agent_file.exists(), "应删除 agent 文件");
     assert!(stdout_str(&uninstall).contains("已卸载"), "stdout: {}", stdout_str(&uninstall));
     assert_eq!(
         curl_log(&s).len(),
@@ -717,7 +761,7 @@ fn uninstall_removes_binary_and_plugin_and_is_idempotent() {
 
     let again = run_install(&s, &["--uninstall"], &extra);
     assert!(again.status.success(), "目标不存在也应成功退出: {}", stderr_str(&again));
-    assert!(!bin.exists() && !plugin_dir.exists(), "再次卸载后仍无残留");
+    assert!(!bin.exists() && !plugin_dir.exists() && !agent_file.exists(), "再次卸载后仍无残留");
 }
 
 /// releases/latest API 不可用：报错并提示手动传版本，非零退出、不残留。
@@ -811,6 +855,79 @@ fn plugin_download_failure_leaves_no_binary() {
     assert!(
         !zsh_custom.join("plugins/ask-opencode").exists(),
         "插件失败不应创建插件目录"
+    );
+    assert_tmp_empty(&s);
+}
+
+/// cmd-gen agent 下载失败：整体失败、二进制不落盘、agent 目录不创建。
+#[test]
+fn agent_download_failure_leaves_no_binary() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+
+    let mut extra: Vec<(&str, &str)> = vec![("AGENT_STATUS", "404")];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &[], &extra);
+    assert!(!out.status.success(), "agent 下载失败应非零退出");
+    assert!(stderr_str(&out).contains("cmd-gen agent 下载失败"), "stderr: {}", stderr_str(&out));
+    assert!(
+        !s.home.join(".local/bin/ask-opencode").exists(),
+        "agent 失败不应残留二进制"
+    );
+    assert!(
+        !s.home.join(".config/opencode/agents").exists(),
+        "agent 失败不应创建 agents 目录"
+    );
+    assert_tmp_empty(&s);
+}
+
+/// `--agent-dir` 覆盖 agent 目录。
+#[test]
+fn agent_dir_flag_overrides_default_agent_dir() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+    let custom = s._dir.path().join("custom-agents");
+
+    let out = run_install(&s, &["--agent-dir", custom.to_str().unwrap()], DARWIN_ARM64);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    let agent = custom.join("cmd-gen.md");
+    assert!(agent.exists(), "应装入 --agent-dir: {}", agent.display());
+    assert_eq!(
+        fs::read_to_string(&agent).unwrap(),
+        fs::read_to_string(&s.fixture_agent).unwrap(),
+        "agent 内容应与 fixture 一致"
+    );
+    assert!(
+        !s.home.join(".config/opencode/agents/cmd-gen.md").exists(),
+        "--agent-dir 后不应再装进默认目录"
+    );
+    assert_tmp_empty(&s);
+}
+
+/// `ASK_OPENCODE_AGENT_DIR` 环境变量覆盖 agent 目录。
+#[test]
+fn agent_dir_env_overrides_default_agent_dir() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+    let custom = s._dir.path().join("env-agents");
+
+    let mut extra: Vec<(&str, &str)> = vec![("ASK_OPENCODE_AGENT_DIR", custom.to_str().unwrap())];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &[], &extra);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    let agent = custom.join("cmd-gen.md");
+    assert!(agent.exists(), "应装入 env 指定目录: {}", agent.display());
+    assert_eq!(
+        fs::read_to_string(&agent).unwrap(),
+        fs::read_to_string(&s.fixture_agent).unwrap(),
+        "agent 内容应与 fixture 一致"
     );
     assert_tmp_empty(&s);
 }

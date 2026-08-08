@@ -1,6 +1,8 @@
 # 0008 安装分发：curl 脚本 + release 资产
 
-用户经仓库根 `install.sh`（curl|sh 或本地跑）安装：binary 从 GitHub Release 资产下载（`ask-opencode-<os>-<arch>-<version>.tar.gz`，darwin/linux × aarch64/x86_64，macOS x86_64 无 Actions runner 故该平台退回本地构建），插件脚本不打包进资产、按同一 tag 从 raw 拉取以保证与 binary 同版本；脚本不改 `.zshrc`，只打印启用提示。下载的资产与同名 `.sha256` 比对后再解压落盘，校验工具按平台选（darwin `shasum -a 256` / linux `sha256sum`），不匹配即失败且不留半装产物；tar.gz 顶层即二进制 `ask-opencode`，安装后统一清理临时文件。
+用户经仓库根 `install.sh`（curl|sh 或本地跑）安装：binary 从 GitHub Release 资产下载（`ask-opencode-<os>-<arch>-<version>.tar.gz`，darwin/linux × aarch64/x86_64，macOS x86_64 无 Actions runner 故该平台退回本地构建），插件脚本与 cmd-gen agent 不打包进资产、按同一 tag 从 raw 拉取以保证与 binary 同版本；脚本不改 `.zshrc`，只打印启用提示。下载的资产与同名 `.sha256` 比对后再解压落盘，校验工具按平台选（darwin `shasum -a 256` / linux `sha256sum`），不匹配即失败且不留半装产物；tar.gz 顶层即二进制 `ask-opencode`，安装后统一清理临时文件。
+
+cmd-gen agent 必装：它是 generate 的默认 agent，缺了装完不能用。默认装进 opencode 全局 agents 目录 `~/.config/opencode/agents/`（`--agent-dir <目录>` / `ASK_OPENCODE_AGENT_DIR` 可覆盖），与插件同一 tag 契约，下载失败即整体失败不留半装。
 
 版本来源默认 `releases/latest` API 取最新非 prerelease tag，API 不可用时报错并提示手动传版本（不静默降级）；`-V <版本>` / `ASK_OPENCODE_VERSION` 显式指定版本即跳过 API。资产下载按 HTTP 状态区分失败：404（平台无匹配资产，当前为 macOS x86_64）打印本地 `cargo build --release` 提示，其余归为下载错误。重复安装幂等覆盖；`--uninstall` 删除 binary 与插件目录且不碰网络，目标不存在也成功退出。
 

@@ -45,12 +45,16 @@ GitHub Release 上按平台/架构构建的二进制压缩包，命名 `ask-open
 _Avoid_: 安装包、编译产物
 
 **安装脚本 (install script)**:
-仓库根 `install.sh`，把发布资产下载校验后装入 binary 目录、把插件脚本按同一 tag 从 raw 拉取装入插件目录；幂等覆盖、支持 `--uninstall`。
+仓库根 `install.sh`，把发布资产下载校验后装入 binary 目录、把 cmd-gen agent 与插件脚本按同一 tag 从 raw 拉取分别装入 opencode 全局 agents 目录与插件目录；幂等覆盖、支持 `--uninstall`。
 _Avoid_: 安装器、installer
 
 **插件目录 (plugin directory)**:
 安装脚本装载 `ask-opencode.plugin.zsh` 的目标目录，oh-my-zsh 下为 `$ZSH_CUSTOM/plugins/ask-opencode/`；curl|sh 场景 `$ZSH_CUSTOM` 不导出，脚本回退到 `$ZSH/custom` 惯例默认。
 _Avoid_: 插件文件夹、插件位置
+
+**agent 目录 (agent directory)**:
+安装脚本装载 cmd-gen agent 的目标目录，opencode 全局 agents 目录 `~/.config/opencode/agents/`；cmd-gen 是 generate 的默认 agent，必装。
+_Avoid_: agent 文件夹、agent 位置
 
 **等待动画 (waiting animation)**:
 生成期间由后台动画进程驱动、在 zsh 状态行循环展示的 spinner + 轮换文案；非阻塞（ADR-0004），完成/失败时立即停止并被「已回填」/错误提示替换。
