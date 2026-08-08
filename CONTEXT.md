@@ -37,3 +37,21 @@ _Avoid_: 选择框、下拉
 **常驻会话 (resident session)**:
 ask-opencode 长期复用的那一个 opencode session，所有生成请求（含校验修正轮）都发往它，模型借此记住跨请求的上下文；与常驻服务是两个正交的东西——后者复用进程、前者复用会话。生命周期与常驻服务一致，用户可显式重置。
 _Avoid_: 会话复用、session 共享、复用会话
+
+### 发布与安装
+
+**发布资产 (release asset)**:
+GitHub Release 上按平台/架构构建的二进制压缩包，命名 `ask-opencode-<os>-<arch>-<version>.tar.gz`，`<os>` 取 `darwin`/`linux`，`<arch>` 取 `aarch64`/`x86_64`，同前缀带 `.sha256` 校验文件。
+_Avoid_: 安装包、编译产物
+
+**安装脚本 (install script)**:
+仓库根 `install.sh`，把发布资产下载校验后装入 binary 目录、把插件脚本按同一 tag 从 raw 拉取装入插件目录；幂等覆盖、支持 `--uninstall`。
+_Avoid_: 安装器、installer
+
+**插件目录 (plugin directory)**:
+安装脚本装载 `ask-opencode.plugin.zsh` 的目标目录，oh-my-zsh 下为 `$ZSH_CUSTOM/plugins/ask-opencode/`。
+_Avoid_: 插件文件夹、插件位置
+
+**等待动画 (waiting animation)**:
+生成期间由后台动画进程驱动、在 zsh 状态行循环展示的 spinner + 轮换文案；非阻塞（ADR-0004），完成/失败时立即停止并被「已回填」/错误提示替换。
+_Avoid_: 加载动画、进度条、loading spinner
