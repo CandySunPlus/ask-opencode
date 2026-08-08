@@ -207,6 +207,19 @@ fn sensitive_rules_merged_from_env() {
 }
 
 #[test]
+fn snapshot_excludes_git_sections() {
+    let (dir, shim) = setup();
+    let history = [": 1700000001:0;git status", ": 1700000002:0;echo done"].join("\n");
+    let text = generate_with(dir.path(), &shim, &history, &[]);
+    // 这些标签来自旧版 git 状态小节（ADR-0005 改为不采集，实现随 5d0a7ed 移除），防其回归。
+    for marker in ["分支：", "status --short", "最近提交", "diff --stat", "git 状态"] {
+        assert!(!text.contains(marker), "快照不应含 git 小节 {marker}: {text}");
+    }
+    assert!(text.contains("- git status"), "git 命令历史应保留: {text}");
+    assert!(text.contains("- echo done"), "普通命令历史应保留: {text}");
+}
+
+#[test]
 fn snapshot_reads_bare_format_history() {
     let (dir, shim) = setup();
     let history = ["ls", "# 怎么压缩这个目录", "git status", "echo done"].join("\n");
