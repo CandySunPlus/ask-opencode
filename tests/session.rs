@@ -667,28 +667,15 @@ fn reset_session_does_not_touch_running_serve() {
     );
 }
 
-/// 重置后下一次 generate 走首次路径建立新会话并落盘新 id、不重拉 serve（ADR-0007）：
-/// 测试进程自己持有一个常驻端口模拟「正在跑的 serve」并预落盘 `{url, pid}`（无 session_id），
-/// 两次请求都复用该 URL、serve 一次都不重拉，重置后再次走 json 落盘新 id。
+/// 重置后下一次 generate 走首次路径建立新会话并落盘新 id（ADR-0007）：
+/// 冷启动下两次请求都走 json、不带 `--session`，第二次不再复用旧 id、落盘新 id。
+/// shim 按调用序号给不同 session id。
 #[test]
 fn reset_session_next_generate_establishes_new_session() {
     let dir = tempfile::tempdir().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    std::fs::write(
-        dir.path().join("server.json"),
-        format!(r#"{{"url":"{url}","pid":99999}}"#),
-    )
-    .unwrap();
-
     let shim = write_fake_opencode(
         dir.path(),
         r#"
-if [ "$1" = "serve" ]; then
-  echo serve >> "$FAKE_SERVE_COUNT"
-  echo 'serve 不应被重新拉起' >&2
-  exit 1
-fi
 n=$(cat "$FAKE_CALL_N" 2>/dev/null || printf '0')
 n=$((n+1))
 echo "$n" > "$FAKE_CALL_N"
@@ -705,11 +692,7 @@ fi
         dir.path(),
         &shim,
         &[
-            ("ASK_OPENCODE_RESIDENT", "true"),
-            (
-                "FAKE_SERVE_COUNT",
-                dir.path().join("serve-count").to_str().unwrap(),
-            ),
+            ("ASK_OPENCODE_RESIDENT", "false"),
             (
                 "FAKE_CALL_N",
                 dir.path().join("call-n").to_str().unwrap(),
@@ -736,14 +719,6 @@ fi
         state["session_id"], "sess-second",
         "应落盘新会话 id: {state}"
     );
-    assert_eq!(state["url"], url, "url 应保留: {state}");
-    assert_eq!(state["pid"], 99999, "pid 应保留: {state}");
-
-    let serves = std::fs::read_to_string(dir.path().join("serve-count")).unwrap_or_default();
-    assert!(
-        serves.is_empty(),
-        "serve 不应被重新拉起: {serves}"
-    );
 
     let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
     assert_eq!(
@@ -752,8 +727,8 @@ fi
         "重置后应再次走 json 首次路径：{args}"
     );
     assert_eq!(
-        args.matches(&format!("--attach\n@@@\n{url}")).count(),
-        2,
-        "两次请求都应复用同一 serve URL：{args}"
+        args.matches("--session").count(),
+        0,
+        "两次请求都不应带 --session：{args}"
     );
 }

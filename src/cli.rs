@@ -21,7 +21,7 @@ pub enum Command {
     Validate(ValidateArgs),
     /// 在候选命令里挑一条：多条弹选择器（内嵌 skim 或外部 fzf），危险命令需 [y/N] 确认后输出
     Select(SelectArgs),
-    /// 清空状态文件里的 session_id、开全新常驻会话；不动常驻服务，幂等（ADR-0007）
+    /// 清空状态文件里的 session_id，下一次请求走首次路径开全新会话；不动常驻服务，幂等（ADR-0007）
     ResetSession,
 }
 
