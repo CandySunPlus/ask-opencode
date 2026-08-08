@@ -74,32 +74,36 @@ _ask_opencode_start() {
     _ask_opencode_anim_pid=$!
   fi
 
-  # 后台：候选写结果文件，退出码经 FIFO 回传（ADR-0004）。
-  # 错误信息折行成单行——FIFO 信号按行读取，多行错误只留首行会截断提示
-  (
-    "${_ask_opencode_cmd}" generate "$request" >"$_ask_opencode_result" 2>"$tmpdir/err.log"
-    local code=$?
-    if (( code == 0 )); then
-      print -r -- "OK" >"$_ask_opencode_fifo"
-    else
-      local err
-      err=$(<"$tmpdir/err.log")
-      print -r -- "ERR ${err//$'\n'/ }" >"$_ask_opencode_fifo"
-    fi
-  ) &!
-  local bg_pid=$!
-
-  # 非阻塞打开 FIFO 读端并注册 handler；打不开时杀掉后台任务并复位（ADR-0004 的状态通道依赖它）
+  # 完成 FIFO 读端：先开读端再起子进程，子进程开头才开得到写端；读端设 cloexec（ADR-0004）
   local fd
-  if sysopen -r -o nonblock -u fd "$_ask_opencode_fifo" 2>/dev/null; then
+  if sysopen -r -o nonblock,cloexec -u fd "$_ask_opencode_fifo" 2>/dev/null; then
     zle -F "$fd" _ask_opencode_ready
   else
     _ask_opencode_stop_animation
-    kill "$bg_pid" 2>/dev/null
     _ask_opencode_busy=0
+    _ask_opencode_cleanup
     zle -M "ask-opencode：无法建立通知管道"
     return
   fi
+
+  # 后台：候选写结果文件，退出码经 FIFO 回传；完成子进程全程持有写端——
+  # 早亡时写端关闭、读端收 EOF 而非「从未有 writer」的 POLLHUP（ADR-0004）
+  (
+    local wfd
+    if ! sysopen -w -o nonblock,cloexec -u wfd "$_ask_opencode_fifo" 2>/dev/null; then
+      exit 1
+    fi
+    # 错误信息折行成单行——FIFO 信号按行读取，多行错误只留首行会截断提示
+    "${_ask_opencode_cmd}" generate "$request" >"$_ask_opencode_result" 2>"$tmpdir/err.log"
+    local code=$?
+    if (( code == 0 )); then
+      print -r -- "OK" >&$wfd
+    else
+      local err
+      err=$(<"$tmpdir/err.log")
+      print -r -- "ERR ${err//$'\n'/ }" >&$wfd
+    fi
+  ) &!
   if [[ -n $_ask_opencode_progress_fd ]]; then
     zle -M "⠋ 请求 opencode"
   else
