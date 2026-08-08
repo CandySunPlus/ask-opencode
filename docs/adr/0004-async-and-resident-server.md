@@ -2,10 +2,11 @@
 
 Tab 按下即返回控制权，任务在后台跑 `opencode run`，就绪后自动弹选择器；首次自动拉起常驻 `opencode serve`，之后 `run --attach` 复用（可配置关闭）。冷启动 10-30s 阻塞 shell 不可接受，常驻服务把二次调用降到 1-3s，代价是自管理一个后台进程，作为配置项可关。本文只管**进程复用**；**会话复用**是另一回事——所有请求进同一个「常驻会话」由 ADR-0007 决定，两者正交。
 
-就绪通知用 `zle -F` 事件而非定时轮询：后台任务把结果写文件、把退出码写 FIFO，`zle -F` 在 FIFO 可读时触发 handler。两条落地约束（见 zsh/ask-opencode.plugin.zsh）：
+就绪通知用 `zle -F` 事件而非定时轮询：后台任务把结果写文件、把退出码写 FIFO，`zle -F` 在 FIFO 可读时触发 handler。三条落地约束（见 zsh/ask-opencode.plugin.zsh）：
 
 - 状态走 FIFO 而非结果文件——`zle -F` 的 handler 里读 FIFO fd 可靠，读普通文件反而会挂。
 - `zle -F` 的 handler 上下文不能做终端 I/O，就绪后的选择器由 handler 转调一个 zsh widget 在前台跑；该 widget 上下文里进程 stdin/stderr 都不是终端，显式从控制终端 `$TTY` 重定向 stdin（危险确认）与 stderr（确认提示）。
+- 完成子进程开头就打开完成 FIFO 写端并全程持有——子进程早亡（写 OK/ERR 前被杀）时写端关闭、读端收到 EOF 触发 handler；若从不持有写端，「从未有 writer」的 FIFO 只报 POLLHUP，而 `zle -F` 只认 readable，busy 会永久卡死。配套两条：父进程先开读端再起子进程（子进程开头就要打开写端，没有读端会打开失败）；读端写端都设 cloexec——写端泄漏进 `generate` 拉起的常驻 serve 的话 serve 替它续命、EOF 永不送达，读端只是防副本泄漏的 fd 卫生。
 
 ## 等待动画
 
