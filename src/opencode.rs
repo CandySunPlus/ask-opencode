@@ -29,21 +29,31 @@ pub fn resolve_bin() -> Result<PathBuf, OpenCodeError> {
     Ok(PathBuf::from("opencode"))
 }
 
-/// 按 `opencode run [--format json] [--attach <url>] --agent <agent> [-m <model>] <request>`
-/// 调用外部二进制，返回其完整输出。常驻开关打开时先确保 serve 在跑，用 `--attach` 复用（ADR-0004）；
-/// `format` 为 Json 时加 `--format json`（首次请求建会话，见 ADR-0007）。
+/// 按 `opencode run [--format json|default] [--session <id>] [--attach <url>] --agent <agent>
+/// [-m <model>] <request>` 调用外部二进制，返回其完整输出。常驻开关打开时先确保 serve 在跑，
+/// 用 `--attach` 复用（ADR-0004）。Json 只走「会话尚未建立」的首次路径（ADR-0007）；
+/// Default 带落盘 id 时显式 `--format default --session <id>`，无 id 时回退每次新会话旧行为。
 pub fn invoke(
     request: &str,
     agent: &str,
     model: Option<&str>,
     config: &Config,
     format: OutputFormat,
+    session_id: Option<&str>,
 ) -> Result<std::process::Output, OpenCodeError> {
     let bin = resolve_bin()?;
     let mut cmd = Command::new(&bin);
     cmd.arg("run");
-    if format == OutputFormat::Json {
-        cmd.arg("--format").arg("json");
+    match format {
+        OutputFormat::Json => {
+            cmd.arg("--format").arg("json");
+        }
+        OutputFormat::Default => {
+            if let Some(id) = session_id {
+                cmd.arg("--format").arg("default");
+                cmd.arg("--session").arg(id);
+            }
+        }
     }
     if config.resident {
         match crate::resident::ensure_server_url(&bin) {
