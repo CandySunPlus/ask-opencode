@@ -113,6 +113,15 @@ fn kill_serve(dir: &Path) {
     }
 }
 
+/// 按状态文件所在目录杀掉 serve（用于状态文件不在配置根目录的场景）。
+fn kill_serve_at_state(state_dir: &Path) {
+    if let Some(pid) = read_serve_pid(state_dir) {
+        let _ = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status();
+    }
+}
+
 fn wait_port_closed(port: u16) {
     for _ in 0..50 {
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
@@ -351,5 +360,5 @@ fn resident_creates_config_dir_when_missing() {
         dir.path().join("nested/deeper/serve.log").exists(),
         "serve 日志应落在自动创建的配置目录"
     );
-    kill_serve(dir.path());
+    kill_serve_at_state(state.parent().unwrap());
 }
