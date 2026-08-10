@@ -6,16 +6,16 @@ use std::path::Path;
 use std::time::Duration;
 
 /// 支持常驻 serve 的 fake opencode shim（ADR-0004）：
-/// `serve` 时打印监听行、把启动次数写入 $FAKE_SERVE_COUNT、exec nc 占用端口保持存活；
-/// `run` 时把运行次数写入 $FAKE_RUN_COUNT、argv 逐行写入 $FAKE_ARGS_LOG、stdout 回可校验候选。
+/// `serve` 时打印监听行、把启动次数写入 $FAKE_SERVE_COUNT、exec fake HTTP 后端占用端口；
+/// `run` 时把运行次数写入 $FAKE_RUN_COUNT、stdout 回可校验候选——常驻模式下不应走到该分支，
+/// 请求走 serve 的 HTTP API。
 const SHIM_RESIDENT: &str = r#"
 if [ "$1" = "serve" ]; then
   echo serve >> "$FAKE_SERVE_COUNT"
   echo "opencode server listening on http://127.0.0.1:$FAKE_SERVE_PORT"
-  exec nc -lk 127.0.0.1 "$FAKE_SERVE_PORT" >/dev/null 2>&1
+  exec python3 "$FAKE_SERVE_SCRIPT"
 fi
 echo run >> "$FAKE_RUN_COUNT"
-for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
 printf 'echo hello\n---CANDIDATE---\nls -la\n'
 "#;
 
@@ -33,16 +33,18 @@ fn free_port() -> u16 {
 fn resident_envs(
     dir: &Path,
     shim: &Path,
+    serve: &Path,
     port: u16,
     resident: Option<&str>,
 ) -> Vec<(String, String)> {
-    resident_envs_with_config(dir, shim, port, resident, &dir.join("config.json"))
+    resident_envs_with_config(dir, shim, serve, port, resident, &dir.join("config.json"))
 }
 
 /// 同 resident_envs，但可指定 ASK_OPENCODE_CONFIG 路径（用于配置目录缺失等场景）。
 fn resident_envs_with_config(
     dir: &Path,
     shim: &Path,
+    serve: &Path,
     port: u16,
     resident: Option<&str>,
     config: &Path,
@@ -60,6 +62,10 @@ fn resident_envs_with_config(
         ("HISTFILE".to_string(), hist.to_str().unwrap().to_string()),
         ("FAKE_SERVE_PORT".to_string(), port.to_string()),
         (
+            "FAKE_SERVE_SCRIPT".to_string(),
+            serve.to_str().unwrap().to_string(),
+        ),
+        (
             "FAKE_SERVE_COUNT".to_string(),
             dir.join("serve-count").to_str().unwrap().to_string(),
         ),
@@ -68,9 +74,14 @@ fn resident_envs_with_config(
             dir.join("run-count").to_str().unwrap().to_string(),
         ),
         (
-            "FAKE_ARGS_LOG".to_string(),
-            dir.join("args.log").to_str().unwrap().to_string(),
+            "FAKE_MSG_LOG".to_string(),
+            dir.join("msg.log").to_str().unwrap().to_string(),
         ),
+        (
+            "FAKE_SESSION_LOG".to_string(),
+            dir.join("session.log").to_str().unwrap().to_string(),
+        ),
+        ("FAKE_RESPONSE".to_string(), "echo hello\n---CANDIDATE---\nls -la\n".to_string()),
     ];
     if let Some(value) = resident {
         envs.push(("ASK_OPENCODE_RESIDENT".to_string(), value.to_string()));
@@ -84,19 +95,9 @@ fn resident_envs_with_config(
 }
 
 /// 在共享目录里驱动 generate（不设 resident 开关，走默认开启）。
-fn run_generate(dir: &Path, shim: &Path, port: u16) -> std::process::Output {
-    let envs = resident_envs(dir, shim, port, None);
+fn run_generate(dir: &Path, shim: &Path, serve: &Path, port: u16) -> std::process::Output {
+    let envs = resident_envs(dir, shim, serve, port, None);
     run_in_dir_owned(dir, &["generate", "list files"], &envs)
-}
-
-/// 从 fake opencode 的 argv 日志里提取每条 run 的 `--attach` URL。
-fn attach_urls(log: &str) -> Vec<String> {
-    let chunks: Vec<&str> = log.split("\n@@@\n").collect();
-    chunks
-        .windows(2)
-        .filter(|pair| pair[0] == "--attach")
-        .map(|pair| pair[1].to_string())
-        .collect()
 }
 
 fn read_serve_pid(dir: &Path) -> Option<u32> {
@@ -122,21 +123,31 @@ fn wait_port_closed(port: u16) {
     }
 }
 
-/// 首次调用自动拉起 serve，二次调用复用同一 URL 且不重新拉起。
+/// 常驻路径不该走 CLI `opencode run`：断言 run-count 文件不存在（shim 的 run 分支从未触发）。
+fn assert_no_cli_runs(dir: &Path) {
+    assert!(
+        !dir.join("run-count").exists(),
+        "常驻模式不应调用 CLI run"
+    );
+}
+
+/// 首次调用自动拉起 serve，二次调用复用同一 URL 且不重新拉起；请求都走 serve 的 HTTP API，
+/// 不再调用 CLI run。
 #[test]
 fn resident_starts_serve_once_and_reuses_url_across_calls() {
     let dir = tempfile::tempdir().unwrap();
     let shim = write_fake_opencode(dir.path(), SHIM_RESIDENT);
+    let serve = write_fake_serve(dir.path());
     let port = free_port();
 
-    let first = run_generate(dir.path(), &shim, port);
+    let first = run_generate(dir.path(), &shim, &serve, port);
     assert!(first.status.success(), "stderr: {}", stderr_str(&first));
     assert_eq!(
         json_stdout(&first),
         serde_json::json!(["echo hello", "ls -la"])
     );
 
-    let second = run_generate(dir.path(), &shim, port);
+    let second = run_generate(dir.path(), &shim, &serve, port);
     assert!(second.status.success(), "stderr: {}", stderr_str(&second));
     assert_eq!(
         json_stdout(&second),
@@ -149,18 +160,10 @@ fn resident_starts_serve_once_and_reuses_url_across_calls() {
         1,
         "serve 应只拉起一次: {serves}"
     );
-    let runs = std::fs::read_to_string(dir.path().join("run-count")).unwrap();
-    assert_eq!(
-        runs.matches("run").count(),
-        2,
-        "应恰好调用 run 两次: {runs}"
-    );
+    assert_no_cli_runs(dir.path());
 
-    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
-    let urls = attach_urls(&args);
-    assert_eq!(urls.len(), 2, "两次 run 都应带 --attach: {args}");
-    assert_eq!(urls[0], urls[1], "二次应复用同一 serve URL: {args}");
-
+    let msgs = std::fs::read_to_string(dir.path().join("msg.log")).unwrap();
+    assert_eq!(msgs.lines().count(), 2, "两次请求都应走 HTTP API: {msgs}");
     kill_serve(dir.path());
 }
 
@@ -169,9 +172,10 @@ fn resident_starts_serve_once_and_reuses_url_across_calls() {
 fn resident_restarts_serve_after_server_dies() {
     let dir = tempfile::tempdir().unwrap();
     let shim = write_fake_opencode(dir.path(), SHIM_RESIDENT);
+    let serve = write_fake_serve(dir.path());
     let port = free_port();
 
-    let first = run_generate(dir.path(), &shim, port);
+    let first = run_generate(dir.path(), &shim, &serve, port);
     assert!(first.status.success(), "stderr: {}", stderr_str(&first));
     let pid = read_serve_pid(dir.path()).expect("首次调用应落盘 serve PID");
     std::process::Command::new("kill")
@@ -180,7 +184,7 @@ fn resident_restarts_serve_after_server_dies() {
         .unwrap();
     wait_port_closed(port);
 
-    let second = run_generate(dir.path(), &shim, port);
+    let second = run_generate(dir.path(), &shim, &serve, port);
     assert!(second.status.success(), "stderr: {}", stderr_str(&second));
 
     let serves = std::fs::read_to_string(dir.path().join("serve-count")).unwrap();
@@ -189,18 +193,20 @@ fn resident_restarts_serve_after_server_dies() {
         2,
         "死后应重新拉起: {serves}"
     );
+    assert_no_cli_runs(dir.path());
     kill_serve(dir.path());
 }
 
-/// 配置文件 `"resident": false` 关闭常驻：每次冷启动，不拉起 serve、不带 --attach。
+/// 配置文件 `"resident": false` 关闭常驻：每次冷启动，不拉起 serve、走 CLI run。
 #[test]
 fn resident_disabled_via_config_uses_cold_start() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("config.json"), r#"{"resident":false}"#).unwrap();
     let shim = write_fake_opencode(dir.path(), SHIM_RESIDENT);
+    let serve = write_fake_serve(dir.path());
     let port = free_port();
 
-    let out = run_generate(dir.path(), &shim, port);
+    let out = run_generate(dir.path(), &shim, &serve, port);
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
     assert_eq!(
         json_stdout(&out),
@@ -209,11 +215,8 @@ fn resident_disabled_via_config_uses_cold_start() {
 
     let serves = std::fs::read_to_string(dir.path().join("serve-count")).unwrap_or_default();
     assert!(serves.is_empty(), "关闭常驻不应拉起 serve: {serves}");
-    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap_or_default();
-    assert!(
-        !args.contains("--attach"),
-        "关闭常驻不应带 --attach: {args}"
-    );
+    let runs = std::fs::read_to_string(dir.path().join("run-count")).unwrap_or_default();
+    assert_eq!(runs.matches("run").count(), 1, "应走 CLI run: {runs}");
 }
 
 /// 环境变量关闭常驻：env 覆盖配置，冷启动路径同样生效。
@@ -221,29 +224,28 @@ fn resident_disabled_via_config_uses_cold_start() {
 fn resident_disabled_via_env_uses_cold_start() {
     let dir = tempfile::tempdir().unwrap();
     let shim = write_fake_opencode(dir.path(), SHIM_RESIDENT);
+    let serve = write_fake_serve(dir.path());
     let port = free_port();
-    let envs = resident_envs(dir.path(), &shim, port, Some("false"));
+    let envs = resident_envs(dir.path(), &shim, &serve, port, Some("false"));
 
     let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
 
     let serves = std::fs::read_to_string(dir.path().join("serve-count")).unwrap_or_default();
     assert!(serves.is_empty(), "关闭常驻不应拉起 serve: {serves}");
-    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap_or_default();
-    assert!(
-        !args.contains("--attach"),
-        "关闭常驻不应带 --attach: {args}"
-    );
+    let runs = std::fs::read_to_string(dir.path().join("run-count")).unwrap_or_default();
+    assert_eq!(runs.matches("run").count(), 1, "应走 CLI run: {runs}");
 }
 
-/// 首次调用即默认开启常驻：serve 自动拉起、run 走 --attach（不设任何 resident 开关）。
+/// 首次调用即默认开启常驻：serve 自动拉起、请求走 HTTP API（不设任何 resident 开关）。
 #[test]
 fn resident_defaults_to_on() {
     let dir = tempfile::tempdir().unwrap();
     let shim = write_fake_opencode(dir.path(), SHIM_RESIDENT);
+    let serve = write_fake_serve(dir.path());
     let port = free_port();
 
-    let out = run_generate(dir.path(), &shim, port);
+    let out = run_generate(dir.path(), &shim, &serve, port);
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
 
     let serves = std::fs::read_to_string(dir.path().join("serve-count")).unwrap_or_default();
@@ -252,8 +254,9 @@ fn resident_defaults_to_on() {
         1,
         "默认应开启常驻: {serves}"
     );
-    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap_or_default();
-    assert!(args.contains("--attach"), "默认应走 --attach: {args}");
+    assert_no_cli_runs(dir.path());
+    let msgs = std::fs::read_to_string(dir.path().join("msg.log")).unwrap();
+    assert_eq!(msgs.lines().count(), 1, "请求应走 HTTP API: {msgs}");
     kill_serve(dir.path());
 }
 
@@ -267,11 +270,13 @@ fn resident_falls_back_to_cold_start_when_serve_fails() {
          \x20 echo 'serve boom' >&2\n\
          \x20 exit 1\n\
          fi\n\
+         echo run >> \"$FAKE_RUN_COUNT\"\n\
          printf 'echo hello\\n---CANDIDATE---\\nls -la\\n'",
     );
+    let serve = write_fake_serve(dir.path());
     let port = free_port();
 
-    let out = run_generate(dir.path(), &shim, port);
+    let out = run_generate(dir.path(), &shim, &serve, port);
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
     assert_eq!(
         json_stdout(&out),
@@ -282,6 +287,8 @@ fn resident_falls_back_to_cold_start_when_serve_fails() {
         "serve 失败应提示降级: {}",
         stderr_str(&out)
     );
+    let runs = std::fs::read_to_string(dir.path().join("run-count")).unwrap_or_default();
+    assert_eq!(runs.matches("run").count(), 1, "应退化为 CLI run: {runs}");
 }
 
 /// 二次请求耗时显著低于冷启动：fake serve 启动带 1s 延迟，首次调用吃满该延迟，
@@ -296,19 +303,20 @@ fn resident_second_request_is_faster_than_cold_start() {
          \x20 sleep 1\n\
          \x20 echo serve >> \"$FAKE_SERVE_COUNT\"\n\
          \x20 echo \"opencode server listening on http://127.0.0.1:$FAKE_SERVE_PORT\"\n\
-         \x20 exec nc -lk 127.0.0.1 \"$FAKE_SERVE_PORT\" >/dev/null 2>&1\n\
+         \x20 exec python3 \"$FAKE_SERVE_SCRIPT\"\n\
          fi\n\
          printf 'echo hello\\n'",
     );
+    let serve = write_fake_serve(dir.path());
     let port = free_port();
 
     let start_first = std::time::Instant::now();
-    let first = run_generate(dir.path(), &shim, port);
+    let first = run_generate(dir.path(), &shim, &serve, port);
     let first_elapsed = start_first.elapsed();
     assert!(first.status.success(), "stderr: {}", stderr_str(&first));
 
     let start_second = std::time::Instant::now();
-    let second = run_generate(dir.path(), &shim, port);
+    let second = run_generate(dir.path(), &shim, &serve, port);
     let second_elapsed = start_second.elapsed();
     assert!(second.status.success(), "stderr: {}", stderr_str(&second));
 
@@ -330,10 +338,11 @@ fn resident_second_request_is_faster_than_cold_start() {
 fn resident_creates_config_dir_when_missing() {
     let dir = tempfile::tempdir().unwrap();
     let shim = write_fake_opencode(dir.path(), SHIM_RESIDENT);
+    let serve = write_fake_serve(dir.path());
     let port = free_port();
     // 指向一个不存在的子目录里的 config.json，模拟用户从未建过配置目录。
     let cfg = dir.path().join("nested/deeper/config.json");
-    let envs = resident_envs_with_config(dir.path(), &shim, port, None, &cfg);
+    let envs = resident_envs_with_config(dir.path(), &shim, &serve, port, None, &cfg);
 
     let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));

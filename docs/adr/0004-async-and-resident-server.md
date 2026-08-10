@@ -1,6 +1,6 @@
 # 0004 异步与常驻服务
 
-Tab 按下即返回控制权，任务在后台跑 `opencode run`，就绪后自动弹选择器；首次自动拉起常驻 `opencode serve`，之后 `run --attach` 复用（可配置关闭）。冷启动 10-30s 阻塞 shell 不可接受，常驻服务把二次调用降到 1-3s，代价是自管理一个后台进程，作为配置项可关。本文只管**进程复用**；**会话复用**是另一回事——所有请求进同一个「常驻会话」由 ADR-0007 决定，两者正交。
+Tab 按下即返回控制权，任务在后台跑 `opencode run`，就绪后自动弹选择器；首次自动拉起常驻 `opencode serve`，之后请求走 serve 的 HTTP API 复用（可配置关闭）。冷启动 10-30s 阻塞 shell 不可接受，常驻服务把二次调用降到 1-3s，代价是自管理一个后台进程，作为配置项可关。本文只管**进程复用**；**会话复用**是另一回事——所有请求进同一个「常驻会话」由 ADR-0007 决定，两者正交。
 
 就绪通知用 `zle -F` 事件而非定时轮询：后台任务把结果写文件、把退出码写 FIFO，`zle -F` 在 FIFO 可读时触发 handler。三条落地约束（见 zsh/ask-opencode.plugin.zsh）：
 
@@ -16,4 +16,4 @@ Tab 按下即返回控制权，任务在后台跑 `opencode run`，就绪后自�
 
 ## 常驻 serve 的生命周期
 
-`generate` 子命令里，常驻开关打开时先确保 serve 在跑：读 `<配置目录>/server.json`（URL + PID + 可选 session_id，后者的会话复用见 ADR-0007），URL 的端口 TCP 连得上则复用；连不上或文件缺失则重新拉起 `opencode serve`、从启动日志 `serve.log` 里等 `opencode server listening on <url>` 一行拿到真实 URL 再落盘。之后 `run --attach <url>`。serve 的 stdout/stderr 重定向到 `serve.log`（每次拉起 truncate，避免读到旧实例的监听行），进程脱离调用方继续存活；启动超时（30s）或提前退出时本次调用退化为冷启动 `run`，并在 stderr 提示，不中断生成。
+`generate` 子命令里，常驻开关打开时先确保 serve 在跑：读 `<配置目录>/server.json`（URL + PID + 可选 session_id，后者的会话复用见 ADR-0007），URL 的端口 TCP 连得上则复用；连不上或文件缺失则重新拉起 `opencode serve`、从启动日志 `serve.log` 里等 `opencode server listening on <url>` 一行拿到真实 URL 再落盘。请求经 serve 的 HTTP API 提交：无会话 id 时先 `POST /session` 建会话，再 `POST /session/{id}/message` 阻塞到模型跑完并取全文。最初用 `run --attach <url>` 提交，实测它不等模型跑完就返回（stdout 空或只有开头事件），请求在 serve 后台跑完、命令落进会话却读不回——故改为 HTTP API（opencode 官方文档「Send a message and wait for response」）。serve 的 stdout/stderr 重定向到 `serve.log`（每次拉起 truncate，避免读到旧实例的监听行），进程脱离调用方继续存活；启动超时（30s）或提前退出时本次调用退化为冷启动 `run`，并在 stderr 提示，不中断生成。

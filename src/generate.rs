@@ -1,7 +1,7 @@
 use crate::cli::GenerateArgs;
 use crate::config::Config;
 use crate::context::ContextSnapshot;
-use crate::opencode::OutputFormat;
+use crate::opencode::{InvokeOutput, OutputFormat};
 use crate::validate::{ValidationResult, validate_candidate};
 use std::io::Write;
 
@@ -70,37 +70,44 @@ pub fn run(args: GenerateArgs) -> i32 {
     }
 }
 
-/// 处理一次 invoke 的输出：非零退出回显 stderr 并返回其退出码；成功则按 format 重组候选、
+/// 处理一次 invoke 的结果：失败回显 stderr 并返回其退出码；成功则按 format 重组候选、
 /// 过静态校验与修正轮后 emit。候选文本与修正轮逻辑原先内联在 run 里，拆出来供
 /// 会话失效重建的重试路径复用。
 fn process_generate_output(
-    output: &std::process::Output,
+    output: &InvokeOutput,
     format: OutputFormat,
     agent: &str,
     model: Option<&str>,
     config: &Config,
 ) -> i32 {
-    if !output.status.success() {
+    if !output.success {
         if !output.stderr.is_empty() {
             std::io::stderr()
-                .write_all(&output.stderr)
+                .write_all(output.stderr.as_bytes())
                 .expect("写 stderr 失败");
         }
-        return output.status.code().unwrap_or(1);
+        return output.exit_code;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let candidates = match format {
         OutputFormat::Json => {
-            let events = crate::parse::parse_json_events(&stdout);
-            if let Some(session_id) = &events.session_id
-                && let Err(err) = crate::resident::save_session_id(session_id)
-            {
-                // 落盘失败不中断本次生成，stderr 提示便于诊断（ADR-0007）。
-                eprintln!("resident: {}", err.message);
+            if let Some(new_session_id) = &output.new_session_id {
+                // 常驻 HTTP 首次路径：会话由 API 直接新建，id 从响应落盘（ADR-0007）。
+                if let Err(err) = crate::resident::save_session_id(new_session_id) {
+                    eprintln!("resident: {}", err.message);
+                }
+                crate::parse::split_candidates(&output.stdout)
+            } else {
+                // CLI 冷启动首次路径：id 只能从 json 事件流抓，文本照常重组（ADR-0007）。
+                let events = crate::parse::parse_json_events(&output.stdout);
+                if let Some(session_id) = &events.session_id
+                    && let Err(err) = crate::resident::save_session_id(session_id)
+                {
+                    eprintln!("resident: {}", err.message);
+                }
+                crate::parse::split_candidates(&events.text)
             }
-            crate::parse::split_candidates(&events.text)
         }
-        OutputFormat::Default => crate::parse::split_candidates(&stdout),
+        OutputFormat::Default => crate::parse::split_candidates(&output.stdout),
     };
     let (passing, failing) = split_by_validation(&candidates);
     let final_candidates = if failing.is_empty() {
@@ -111,11 +118,11 @@ fn process_generate_output(
     crate::parse::emit_candidates(&final_candidates, "generate")
 }
 
-/// 是否命中 opencode 对已失效会话的硬失败签名（ADR-0007）：退出码 1 且 stderr 含
-/// `SESSION_NOT_FOUND`，与规格给出的失效形态一致，避免被顺带提及该串的错误误触发。
-fn session_not_found(output: &std::process::Output) -> bool {
-    output.status.code() == Some(1)
-        && String::from_utf8_lossy(&output.stderr).contains(SESSION_NOT_FOUND)
+/// 是否命中 opencode 对已失效会话的硬失败签名（ADR-0007）：CLI 冷启动是退出码 1 且 stderr
+/// 含 `SESSION_NOT_FOUND`；常驻 HTTP 路径是 404 且响应体含该串，两路各自只认自己的退出码。
+fn session_not_found(output: &InvokeOutput) -> bool {
+    (output.exit_code == 1 || output.exit_code == 404)
+        && output.stderr.contains(SESSION_NOT_FOUND)
 }
 
 /// 把候选按是否通过三项静态检查拆成两组。
@@ -156,11 +163,10 @@ fn correction_round(
     ) else {
         return result;
     };
-    if !output.status.success() {
+    if !output.success {
         return result;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    for candidate in crate::parse::split_candidates(&text) {
+    for candidate in crate::parse::split_candidates(&output.stdout) {
         if validate_candidate(&candidate).passed {
             result.push(candidate);
         }

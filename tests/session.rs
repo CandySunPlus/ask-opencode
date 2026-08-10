@@ -5,14 +5,14 @@ use std::net::TcpListener;
 use std::path::Path;
 
 /// 支持常驻会话的 fake opencode shim（ADR-0007）：
-/// `serve` 时打印监听行、exec nc 占端口保持存活；`run` 时把 argv 逐行写入 $FAKE_ARGS_LOG，
+/// `serve` 时打印监听行、exec fake HTTP 后端占用端口；`run` 时把 argv 逐行写入 $FAKE_ARGS_LOG，
 /// 按是否带 `--format json` 分支：json 输出带 `sessionID` 的事件流（`text` 事件含分隔符候选），
-/// default 输出候选文本。
+/// default 输出候选文本。常驻模式只走 serve 的 HTTP API，run 分支不应被触发。
 const SHIM_SESSION: &str = r#"
 if [ "$1" = "serve" ]; then
   echo serve >> "$FAKE_SERVE_COUNT"
   echo "opencode server listening on http://127.0.0.1:$FAKE_SERVE_PORT"
-  exec nc -lk 127.0.0.1 "$FAKE_SERVE_PORT" >/dev/null 2>&1
+  exec python3 "$FAKE_SERVE_SCRIPT"
 fi
 echo run >> "$FAKE_RUN_COUNT"
 for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
@@ -81,6 +81,47 @@ fn session_envs(dir: &Path, shim: &Path, extra: &[(&str, &str)]) -> Vec<(String,
         envs.push((k.to_string(), v.to_string()));
     }
     envs
+}
+
+/// 常驻模式的完整 env：在 session_envs 之上追加 fake HTTP 后端所需的 serve 环境变量。
+fn serve_envs(
+    dir: &Path,
+    shim: &Path,
+    serve: &Path,
+    port: u16,
+    extra: &[(&str, &str)],
+) -> Vec<(String, String)> {
+    let mut envs = session_envs(dir, shim, extra);
+    envs.push(("FAKE_SERVE_PORT".to_string(), port.to_string()));
+    envs.push((
+        "FAKE_SERVE_SCRIPT".to_string(),
+        serve.to_str().unwrap().to_string(),
+    ));
+    envs.push((
+        "FAKE_SERVE_COUNT".to_string(),
+        dir.join("serve-count").to_str().unwrap().to_string(),
+    ));
+    envs.push((
+        "FAKE_MSG_LOG".to_string(),
+        dir.join("msg.log").to_str().unwrap().to_string(),
+    ));
+    envs.push((
+        "FAKE_SESSION_LOG".to_string(),
+        dir.join("session.log").to_str().unwrap().to_string(),
+    ));
+    envs.push((
+        "FAKE_RESPONSE".to_string(),
+        "echo hello\n---CANDIDATE---\nls -la\n".to_string(),
+    ));
+    envs
+}
+
+/// 常驻路径不该走 CLI `opencode run`：断言 run-count 文件不存在（shim 的 run 分支从未触发）。
+fn assert_no_cli_runs(dir: &Path) {
+    assert!(
+        !dir.join("run-count").exists(),
+        "常驻模式不应调用 CLI run"
+    );
 }
 
 /// 无落盘 session id（reuse_session 默认开）时走 json 首次路径：
@@ -336,24 +377,20 @@ fi
     );
 }
 
-/// serve 模式首次请求：`--attach <url>` 与 `--format json` 同带，
-/// 状态文件 `{url, pid}` 不受影响、只追加 `session_id`。
+/// serve 模式首次请求：无落盘会话 id 时由 HTTP API 建新会话（POST /session）再发消息，
+/// 状态文件 `{url, pid}` 不受影响、只追加新建的 `session_id`；不再调用 CLI run。
 #[test]
 fn first_request_in_serve_mode_keeps_url_and_pid() {
     let dir = tempfile::tempdir().unwrap();
     let shim = write_fake_opencode(dir.path(), SHIM_SESSION);
+    let serve = write_fake_serve(dir.path());
     let port = free_port();
-    let envs = session_envs(
+    let envs = serve_envs(
         dir.path(),
         &shim,
-        &[
-            ("ASK_OPENCODE_RESIDENT", "true"),
-            ("FAKE_SERVE_PORT", &port.to_string()),
-            (
-                "FAKE_SERVE_COUNT",
-                dir.path().join("serve-count").to_str().unwrap(),
-            ),
-        ],
+        &serve,
+        port,
+        &[("ASK_OPENCODE_RESIDENT", "true")],
     );
 
     let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
@@ -369,46 +406,39 @@ fn first_request_in_serve_mode_keeps_url_and_pid() {
         1,
         "serve 应只拉起一次: {serves}"
     );
+    assert_no_cli_runs(dir.path());
 
-    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
-    let url = format!("http://127.0.0.1:{port}");
-    assert!(
-        has_pair(&args, "--attach", &url),
-        "serve 模式应带 --attach: {args}"
-    );
-    assert!(
-        has_pair(&args, "--format", "json"),
-        "首次请求应带 --format json: {args}"
+    let sessions = std::fs::read_to_string(dir.path().join("session.log")).unwrap();
+    assert_eq!(
+        sessions.lines().count(),
+        1,
+        "首次请求应经 POST /session 建会话: {sessions}"
     );
 
     let state = read_state(dir.path());
+    let url = format!("http://127.0.0.1:{port}");
     assert_eq!(state["url"], url, "状态应保留 url: {state}");
     assert!(state["pid"].as_u64().is_some(), "状态应保留 pid: {state}");
     assert_eq!(
-        state["session_id"], "sess-abc123",
-        "状态应落盘 session_id: {state}"
+        state["session_id"], "sess-http-1",
+        "状态应落盘新建会话 id: {state}"
     );
     kill_serve(dir.path());
 }
 
-/// serve 模式二次请求：复用同一会话，argv 同时带 `--attach <url>` 与
-/// `--format default --session <id>`，serve 仍只拉起一次。
+/// serve 模式二次请求：复用已落盘会话，消息仍走 HTTP API、不再新建会话、serve 仍只拉起一次。
 #[test]
-fn second_request_in_serve_mode_reuses_session_with_attach() {
+fn second_request_in_serve_mode_reuses_session() {
     let dir = tempfile::tempdir().unwrap();
     let shim = write_fake_opencode(dir.path(), SHIM_SESSION);
+    let serve = write_fake_serve(dir.path());
     let port = free_port();
-    let envs = session_envs(
+    let envs = serve_envs(
         dir.path(),
         &shim,
-        &[
-            ("ASK_OPENCODE_RESIDENT", "true"),
-            ("FAKE_SERVE_PORT", &port.to_string()),
-            (
-                "FAKE_SERVE_COUNT",
-                dir.path().join("serve-count").to_str().unwrap(),
-            ),
-        ],
+        &serve,
+        port,
+        &[("ASK_OPENCODE_RESIDENT", "true")],
     );
 
     let first = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
@@ -431,29 +461,64 @@ fn second_request_in_serve_mode_reuses_session_with_attach() {
         1,
         "serve 应只拉起一次: {serves}"
     );
+    assert_no_cli_runs(dir.path());
 
-    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
-    let url = format!("http://127.0.0.1:{port}");
+    let sessions = std::fs::read_to_string(dir.path().join("session.log")).unwrap();
     assert_eq!(
-        args.matches(&format!("--attach\n@@@\n{url}")).count(),
-        2,
-        "两次请求都应带 --attach：{args}"
-    );
-    assert_eq!(
-        args.matches("--format\n@@@\njson").count(),
+        sessions.lines().count(),
         1,
-        "只有首次请求走 json：{args}"
+        "二次请求应复用已落盘会话、不再新建: {sessions}"
     );
+    let msgs = std::fs::read_to_string(dir.path().join("msg.log")).unwrap();
+    assert_eq!(msgs.lines().count(), 2, "两次请求都应发消息: {msgs}");
+
+    let state = read_state(dir.path());
+    assert_eq!(state["session_id"], "sess-http-1");
+    kill_serve(dir.path());
+}
+
+/// 常驻模式下校验修正轮复用主请求刚落盘的同一会话（ADR-0007）：主请求走 HTTP 首次路径
+/// 建会话，触发修正轮后第二次 POST /message 不发 POST /session、仍落盘同一 id。
+#[test]
+fn correction_round_in_serve_mode_reuses_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = write_fake_opencode(dir.path(), SHIM_SESSION);
+    let serve = write_fake_serve(dir.path());
+    let port = free_port();
+    let envs = serve_envs(
+        dir.path(),
+        &shim,
+        &serve,
+        port,
+        &[
+            ("ASK_OPENCODE_RESIDENT", "true"),
+            (
+                "FAKE_RESPONSE_1",
+                "echo ok\n---CANDIDATE---\nfoobar_nonexistent_xyz\n",
+            ),
+            ("FAKE_RESPONSE_2", "echo fixed\n"),
+        ],
+    );
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
     assert_eq!(
-        args.matches("--format\n@@@\ndefault").count(),
-        1,
-        "二次请求应走 default 格式：{args}"
+        json_stdout(&out),
+        serde_json::json!(["echo ok", "echo fixed"])
     );
+
+    let sessions = std::fs::read_to_string(dir.path().join("session.log")).unwrap();
     assert_eq!(
-        args.matches("--session\n@@@\nsess-abc123").count(),
+        sessions.lines().count(),
         1,
-        "二次请求应复用已落盘会话：{args}"
+        "主请求与修正轮不应各自建会话: {sessions}"
     );
+    let msgs = std::fs::read_to_string(dir.path().join("msg.log")).unwrap();
+    assert_eq!(msgs.lines().count(), 2, "主请求与修正轮各发一次消息: {msgs}");
+    assert_no_cli_runs(dir.path());
+
+    let state = read_state(dir.path());
+    assert_eq!(state["session_id"], "sess-http-1");
     kill_serve(dir.path());
 }
 
@@ -462,6 +527,7 @@ fn second_request_in_serve_mode_reuses_session_with_attach() {
 fn starting_serve_preserves_persisted_session_id() {
     let dir = tempfile::tempdir().unwrap();
     let shim = write_fake_opencode(dir.path(), SHIM_SESSION);
+    let serve = write_fake_serve(dir.path());
     let port = free_port();
 
     let cold = session_envs(dir.path(), &shim, &[("ASK_OPENCODE_RESIDENT", "false")]);
@@ -469,17 +535,12 @@ fn starting_serve_preserves_persisted_session_id() {
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
     assert_eq!(read_state(dir.path())["session_id"], "sess-abc123");
 
-    let serve_envs = session_envs(
+    let serve_envs = serve_envs(
         dir.path(),
         &shim,
-        &[
-            ("ASK_OPENCODE_RESIDENT", "true"),
-            ("FAKE_SERVE_PORT", &port.to_string()),
-            (
-                "FAKE_SERVE_COUNT",
-                dir.path().join("serve-count").to_str().unwrap(),
-            ),
-        ],
+        &serve,
+        port,
+        &[("ASK_OPENCODE_RESIDENT", "true")],
     );
     let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &serve_envs);
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
@@ -832,7 +893,7 @@ fi
 
 /// serve 模式下会话失效重建（ADR-0007）：预写一个 session_id 但没有 url 的状态文件，
 /// 首请求发现 serve 不在跑而重新拉起——模拟「serve 重启后会话失效」；重建只清 session_id、
-/// `{url, pid}` 保留，重建走 json 首次路径、仍带 `--attach`。
+/// `{url, pid}` 保留，HTTP API 对失效 id 返回 404「Session not found」，随后以新会话重跑一次。
 #[test]
 fn expired_session_rebuild_keeps_serve_url_and_pid() {
     let dir = tempfile::tempdir().unwrap();
@@ -843,28 +904,22 @@ fn expired_session_rebuild_keeps_serve_url_and_pid() {
 if [ "$1" = "serve" ]; then
   echo serve >> "$FAKE_SERVE_COUNT"
   echo "opencode server listening on http://127.0.0.1:$FAKE_SERVE_PORT"
-  exec nc -lk 127.0.0.1 "$FAKE_SERVE_PORT" >/dev/null 2>&1
+  exec python3 "$FAKE_SERVE_SCRIPT"
 fi
 for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
-if printf '%s' "$*" | grep -q -- '--format json'; then
-  printf '%s\n' '{"type":"text","sessionID":"sess-new","timestamp":1,"part":{"id":"p1","type":"text","text":"echo hello\n---CANDIDATE---\nls -la\n"}}'
-else
-  echo 'Session not found' >&2
-  exit 1
-fi
+printf 'echo hello\n---CANDIDATE---\nls -la\n'
 "#,
     );
+    let serve = write_fake_serve(dir.path());
     let port = free_port();
-    let envs = session_envs(
+    let envs = serve_envs(
         dir.path(),
         &shim,
+        &serve,
+        port,
         &[
             ("ASK_OPENCODE_RESIDENT", "true"),
-            ("FAKE_SERVE_PORT", &port.to_string()),
-            (
-                "FAKE_SERVE_COUNT",
-                dir.path().join("serve-count").to_str().unwrap(),
-            ),
+            ("FAKE_404_SESSION", "sess-stale"),
         ],
     );
 
@@ -877,7 +932,7 @@ fi
 
     let state = read_state(dir.path());
     assert_eq!(
-        state["session_id"], "sess-new",
+        state["session_id"], "sess-http-1",
         "重建应落盘新会话 id: {state}"
     );
     assert_eq!(
@@ -887,18 +942,12 @@ fi
     );
     assert!(state["pid"].as_u64().is_some(), "重建应保留 pid: {state}");
 
-    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
-    let url = format!("http://127.0.0.1:{port}");
-    assert_eq!(
-        args.matches(&format!("--attach\n@@@\n{url}")).count(),
-        2,
-        "重建也应带 --attach：{args}"
-    );
-    assert_eq!(
-        args.matches("--format\n@@@\njson").count(),
-        1,
-        "重建应走 json 首次路径：{args}"
-    );
+    // 失效 id 的消息 404 一次、重建后新会话的消息成功一次；重建走 POST /session 新建。
+    let msgs = std::fs::read_to_string(dir.path().join("msg.log")).unwrap();
+    assert_eq!(msgs.lines().count(), 2, "应尝试旧 id 一次、新会话一次: {msgs}");
+    let sessions = std::fs::read_to_string(dir.path().join("session.log")).unwrap();
+    assert_eq!(sessions.lines().count(), 1, "重建应新建一次会话: {sessions}");
+    assert_no_cli_runs(dir.path());
     kill_serve(dir.path());
 }
 
