@@ -477,6 +477,51 @@ fn second_request_in_serve_mode_reuses_session() {
     kill_serve(dir.path());
 }
 
+/// 常驻模式下校验修正轮复用主请求刚落盘的同一会话（ADR-0007）：主请求走 HTTP 首次路径
+/// 建会话，触发修正轮后第二次 POST /message 不发 POST /session、仍落盘同一 id。
+#[test]
+fn correction_round_in_serve_mode_reuses_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = write_fake_opencode(dir.path(), SHIM_SESSION);
+    let serve = write_fake_serve(dir.path());
+    let port = free_port();
+    let envs = serve_envs(
+        dir.path(),
+        &shim,
+        &serve,
+        port,
+        &[
+            ("ASK_OPENCODE_RESIDENT", "true"),
+            (
+                "FAKE_RESPONSE_1",
+                "echo ok\n---CANDIDATE---\nfoobar_nonexistent_xyz\n",
+            ),
+            ("FAKE_RESPONSE_2", "echo fixed\n"),
+        ],
+    );
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(
+        json_stdout(&out),
+        serde_json::json!(["echo ok", "echo fixed"])
+    );
+
+    let sessions = std::fs::read_to_string(dir.path().join("session.log")).unwrap();
+    assert_eq!(
+        sessions.lines().count(),
+        1,
+        "主请求与修正轮不应各自建会话: {sessions}"
+    );
+    let msgs = std::fs::read_to_string(dir.path().join("msg.log")).unwrap();
+    assert_eq!(msgs.lines().count(), 2, "主请求与修正轮各发一次消息: {msgs}");
+    assert_no_cli_runs(dir.path());
+
+    let state = read_state(dir.path());
+    assert_eq!(state["session_id"], "sess-http-1");
+    kill_serve(dir.path());
+}
+
 /// serve 首次拉起时保留既有的 session_id：先冷启动落盘会话、后开常驻，状态不丢会话。
 #[test]
 fn starting_serve_preserves_persisted_session_id() {

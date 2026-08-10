@@ -99,6 +99,8 @@ pub fn write_fake_bin(dir: &Path, name: &str, script: &str) -> PathBuf {
 ///   FAKE_MSG_LOG       POST /message 的请求体逐行 JSON 追加写入该文件
 ///   FAKE_SESSION_LOG   POST /session 新建的会话 id 追加写入该文件
 ///   FAKE_RESPONSE      POST /message 返回的助手 text part 内容
+///   FAKE_RESPONSE_N    第 N 次 POST /message 返回该内容（覆盖 FAKE_RESPONSE），供修正轮等
+///                      按调用序号给不同响应的场景
 ///   FAKE_404_SESSION   命中该会话 id 的消息返回 404「Session not found」（模拟会话失效）
 pub fn write_fake_serve(dir: &Path) -> PathBuf {
     let script = r#"import json, os, re
@@ -109,7 +111,10 @@ MSG_LOG = os.environ.get("FAKE_MSG_LOG", "")
 SESSION_LOG = os.environ.get("FAKE_SESSION_LOG", "")
 RESPONSE = os.environ.get("FAKE_RESPONSE", "echo hello\n---CANDIDATE---\nls -la\n")
 NOT_FOUND_SESSION = os.environ.get("FAKE_404_SESSION", "")
-counter = {"n": 0}
+counter = {"n": 0, "m": 0}
+
+def nth_response():
+    return os.environ.get("FAKE_RESPONSE_%d" % counter["m"]) or RESPONSE
 
 class H(BaseHTTPRequestHandler):
     def _reply(self, code, obj):
@@ -135,13 +140,14 @@ class H(BaseHTTPRequestHandler):
         m = re.match(r"^/session/(sess-[^/]+)/message$", path)
         if m:
             sid = m.group(1)
+            counter["m"] += 1
             if MSG_LOG:
                 with open(MSG_LOG, "a") as f:
                     f.write(json.dumps(json.loads(raw or "{}"), ensure_ascii=False) + "\n")
             if NOT_FOUND_SESSION and sid == NOT_FOUND_SESSION:
                 self._reply(404, {"name": "NotFoundError", "data": {"message": "Session not found: " + sid}})
                 return
-            self._reply(200, {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": RESPONSE}]})
+            self._reply(200, {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": nth_response()}]})
             return
         self._reply(404, {"name": "NotFoundError", "data": {"message": "no route"}})
 
