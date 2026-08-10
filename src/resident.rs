@@ -38,7 +38,7 @@ fn prepare_state_path() -> Result<PathBuf, OpenCodeError> {
     Ok(state_path)
 }
 
-/// 确保常驻 serve 在跑并返回其 URL，供 `run --attach` 复用（ADR-0004）。
+/// 确保常驻 serve 在跑并返回其 URL，供常驻 HTTP API 复用（ADR-0004）。
 pub fn ensure_server_url(bin: &Path) -> Result<String, OpenCodeError> {
     let state_path = prepare_state_path()?;
     if let Some(state) = load_state(&state_path)

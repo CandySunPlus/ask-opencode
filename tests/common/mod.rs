@@ -92,6 +92,67 @@ pub fn write_fake_bin(dir: &Path, name: &str, script: &str) -> PathBuf {
     path
 }
 
+/// 常驻 serve 的 HTTP 后端（ADR-0004 修订：resident 路径不再走 `opencode run --attach`，
+/// 改用 serve 的 HTTP API）。写一个可执行的 python 脚本，由 fake opencode shim 的 serve
+/// 分支 exec 起来，返回脚本路径。环境变量契约：
+///   FAKE_SERVE_PORT    监听端口
+///   FAKE_MSG_LOG       POST /message 的请求体逐行 JSON 追加写入该文件
+///   FAKE_SESSION_LOG   POST /session 新建的会话 id 追加写入该文件
+///   FAKE_RESPONSE      POST /message 返回的助手 text part 内容
+///   FAKE_404_SESSION   命中该会话 id 的消息返回 404「Session not found」（模拟会话失效）
+pub fn write_fake_serve(dir: &Path) -> PathBuf {
+    let script = r#"import json, os, re
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+PORT = int(os.environ["FAKE_SERVE_PORT"])
+MSG_LOG = os.environ.get("FAKE_MSG_LOG", "")
+SESSION_LOG = os.environ.get("FAKE_SESSION_LOG", "")
+RESPONSE = os.environ.get("FAKE_RESPONSE", "echo hello\n---CANDIDATE---\nls -la\n")
+NOT_FOUND_SESSION = os.environ.get("FAKE_404_SESSION", "")
+counter = {"n": 0}
+
+class H(BaseHTTPRequestHandler):
+    def _reply(self, code, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b""
+        path = self.path.split("?")[0]
+        if path == "/session":
+            counter["n"] += 1
+            sid = "sess-http-%d" % counter["n"]
+            if SESSION_LOG:
+                with open(SESSION_LOG, "a") as f:
+                    f.write(sid + "\n")
+            self._reply(200, {"id": sid})
+            return
+        m = re.match(r"^/session/(sess-[^/]+)/message$", path)
+        if m:
+            sid = m.group(1)
+            if MSG_LOG:
+                with open(MSG_LOG, "a") as f:
+                    f.write(json.dumps(json.loads(raw or "{}"), ensure_ascii=False) + "\n")
+            if NOT_FOUND_SESSION and sid == NOT_FOUND_SESSION:
+                self._reply(404, {"name": "NotFoundError", "data": {"message": "Session not found: " + sid}})
+                return
+            self._reply(200, {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": RESPONSE}]})
+            return
+        self._reply(404, {"name": "NotFoundError", "data": {"message": "no route"}})
+
+    def log_message(self, *args):
+        pass
+
+HTTPServer(("127.0.0.1", PORT), H).serve_forever()
+"#;
+    write_fake_bin(dir, "fake-serve.py", script)
+}
+
 /// 写一个把 argv 逐行写入日志（`@@@` 分隔、请求文本可能含换行）、stdout 回 `echo done` 的
 /// fake opencode shim，返回其路径。用于断言 opencode 收到的参数与请求内容。
 pub fn write_shim_echo_args(dir: &Path, log: &Path) -> PathBuf {

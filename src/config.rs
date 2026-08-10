@@ -21,7 +21,7 @@ pub struct Config {
     pub picker: String,
     /// 外部 fzf 可执行文件路径；仅在 `picker` 为 `fzf` 时使用。
     pub fzf_bin: String,
-    /// 是否启用常驻 opencode serve（ADR-0004）：首次调用自动拉起、后续 `run --attach` 复用。
+    /// 是否启用常驻 opencode serve（ADR-0004）：首次调用自动拉起、后续请求走 serve 的 HTTP API 复用。
     pub resident: bool,
     /// 是否复用同一个 opencode session（ADR-0007）：默认开，关闭时每次请求开全新会话。
     pub reuse_session: bool,
