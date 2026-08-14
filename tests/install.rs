@@ -12,18 +12,20 @@ const RAW_MAIN: &str =
 /// 固定 darwin/arm64 平台信号的 uname 覆盖（macOS arm64 归一为 aarch64 的输入）。
 const DARWIN_ARM64: &[(&str, &str)] = &[("FAKE_UNAME_S", "Darwin"), ("FAKE_UNAME_M", "arm64")];
 
-/// stub curl：按 URL 分发 fixture。`-o` 写文件，否则写 stdout；`-w` 时把 HTTP 状态码打到
-/// stdout（真实 curl 配合 -o 的行为）。每次请求的 URL 追加到 `$CURL_LOG`，供断言下载顺序与
-/// 资产命名契约。`API_STATUS`/`ASSET_STATUS`/`PLUGIN_STATUS`/`AGENT_STATUS` 可覆盖对应请求的
-/// 状态码，模拟 API 不可用、平台无资产、插件脚本下载失败等降级路径。
+/// stub curl：按 URL 分发 fixture。`-o` 写文件，否则写 stdout；`-w` 按格式输出——
+/// `%{http_code}` 打状态码（真实 curl 配合 -o 的行为），`%{url_effective}` 打重定向目标
+/// （模拟 github.com releases/latest 的 HTML 重定向）。每次请求的 URL 追加到 `$CURL_LOG`，
+/// 供断言下载顺序与资产命名契约。`API_STATUS`/`REDIRECT_STATUS`/`ASSET_STATUS`/
+/// `PLUGIN_STATUS`/`AGENT_STATUS` 可覆盖对应请求的状态码，模拟 API 限流、平台无资产、
+/// 插件脚本下载失败等降级路径。
 const CURL_STUB: &str = r#"
 out=""
 url=""
-print_code=0
+writeout=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
-    -w) print_code=1; shift 2 ;;
+    -w) writeout="$2"; shift 2 ;;
     -*) shift ;;
     *) url="$1"; shift ;;
   esac
@@ -31,8 +33,10 @@ done
 echo "$url" >> "$CURL_LOG"
 payload=""
 status=200
+redirect=""
 case "$url" in
-  */releases/latest) payload="$RELEASES_JSON"; status="${API_STATUS:-200}" ;;
+  *api.github.com*releases/latest) payload="$RELEASES_JSON"; status="${API_STATUS:-200}" ;;
+  *github.com*releases/latest) redirect="$REDIRECT_TAG_URL"; status="${REDIRECT_STATUS:-200}" ;;
   *install.sh) payload="$FAKE_INSTALL_SCRIPT" ;;
   *ask-opencode.plugin.zsh) payload="$FIXTURE_PLUGIN"; status="${PLUGIN_STATUS:-200}" ;;
   *cmd-gen.md) payload="$FIXTURE_AGENT"; status="${AGENT_STATUS:-200}" ;;
@@ -45,7 +49,12 @@ if [ "$status" = 200 ] && [ -n "$payload" ]; then
 elif [ -n "$out" ]; then
   : > "$out"
 fi
-if [ "$print_code" = 1 ]; then printf '%s\n' "$status"; fi
+if [ -n "$writeout" ]; then
+  case "$writeout" in
+    *url_effective*) [ "$status" = 200 ] && printf '%s\n' "$redirect" ;;
+    *) printf '%s\n' "$status" ;;
+  esac
+fi
 [ "$status" = 200 ] || exit 22
 "#;
 
@@ -160,6 +169,10 @@ fn envs(s: &Sandbox, extra: &[(&str, &str)]) -> Vec<(String, String)> {
         ("TMPDIR".into(), s.tmp.display().to_string()),
         ("CURL_LOG".into(), s.curl_log.display().to_string()),
         ("RELEASES_JSON".into(), s.releases_json.display().to_string()),
+        (
+            "REDIRECT_TAG_URL".into(),
+            format!("https://github.com/CandySunPlus/ask-opencode/releases/tag/{TAG}"),
+        ),
         ("FIXTURE_ASSET".into(), s.fixture_asset.display().to_string()),
         ("FIXTURE_SHA".into(), s.fixture_sha.display().to_string()),
         ("FIXTURE_PLUGIN".into(), s.fixture_plugin.display().to_string()),
@@ -170,6 +183,7 @@ fn envs(s: &Sandbox, extra: &[(&str, &str)]) -> Vec<(String, String)> {
         ("ZSH".into(), "".into()),
         // stub curl 的降级路径状态码默认全 200，需要故障路径的用例在 extra 里覆盖。
         ("API_STATUS".into(), "200".into()),
+        ("REDIRECT_STATUS".into(), "200".into()),
         ("ASSET_STATUS".into(), "200".into()),
         ("PLUGIN_STATUS".into(), "200".into()),
         ("AGENT_STATUS".into(), "200".into()),
@@ -764,9 +778,10 @@ fn uninstall_removes_binary_and_plugin_and_is_idempotent() {
     assert!(!bin.exists() && !plugin_dir.exists() && !agent_file.exists(), "再次卸载后仍无残留");
 }
 
-/// releases/latest API 不可用：报错并提示手动传版本，非零退出、不残留。
+/// releases/latest API 限流/失败（403 等）：回退到 github.com 的 HTML releases/latest
+/// 重定向取 tag，安装照常成功，两次请求都发生在资产下载之前。
 #[test]
-fn latest_api_failure_hints_manual_version() {
+fn latest_api_failure_falls_back_to_html_redirect() {
     let s = setup_sandbox();
     install_fakes(&s);
     make_fixtures(&s);
@@ -774,14 +789,41 @@ fn latest_api_failure_hints_manual_version() {
     let mut extra: Vec<(&str, &str)> = vec![("API_STATUS", "500")];
     extra.extend_from_slice(DARWIN_ARM64);
     let out = run_install(&s, &[], &extra);
-    assert!(!out.status.success(), "API 失败应非零退出");
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    let log = curl_log(&s);
+    assert_eq!(log.len(), 5, "API 失败应回退 HTML 重定向（API/重定向/资产/校验/agent）: {log:?}");
+    assert!(log[0].contains("api.github.com") && log[0].ends_with("/releases/latest"), "{log:?}");
+    assert!(
+        log[1].ends_with("github.com/CandySunPlus/ask-opencode/releases/latest"),
+        "应请求 HTML 重定向: {log:?}"
+    );
+    assert!(
+        log[2].ends_with(&format!("ask-opencode-darwin-aarch64-{TAG}.tar.gz")),
+        "回退后资产仍按同一 tag 拉取: {log:?}"
+    );
+    assert_tmp_empty(&s);
+}
+
+/// API 与 HTML 重定向两路都不可用：报错并提示手动传版本，非零退出、不残留。
+#[test]
+fn latest_all_sources_fail_hints_manual_version() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+
+    let mut extra: Vec<(&str, &str)> = vec![("API_STATUS", "500"), ("REDIRECT_STATUS", "500")];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &[], &extra);
+    assert!(!out.status.success(), "两路版本来源都失败应非零退出");
     let err = stderr_str(&out);
     assert!(err.contains("无法获取最新版本"), "stderr: {err}");
     assert!(err.contains("-V"), "应提示手动传版本: {err}");
     assert!(err.contains("ASK_OPENCODE_VERSION"), "应提示环境变量: {err}");
     assert!(
         !s.home.join(".local/bin/ask-opencode").exists(),
-        "API 失败不应残留二进制"
+        "版本来源失败不应残留二进制"
     );
 }
 

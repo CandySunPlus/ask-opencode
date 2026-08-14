@@ -14,6 +14,7 @@ set -eu
 
 repo="CandySunPlus/ask-opencode"
 api_base="https://api.github.com/repos/$repo"
+web_latest="https://github.com/$repo/releases/latest"
 release_base="https://github.com/$repo/releases/download"
 raw_base="https://raw.githubusercontent.com/$repo"
 
@@ -34,10 +35,18 @@ tag 装进 opencode 全局 agents 目录（默认 ~/.config/opencode/agents）�
 EOF
 }
 
-# 从 GitHub API 取最新非 prerelease 的 tag；失败时输出空串。
+# 取最新非 prerelease 的 tag。优先 GitHub API 的 releases/latest；API 被未认证限流
+# 拒掉（HTTP 403）等失败时，回退到 github.com 的 HTML releases/latest 重定向——该端点
+# 走页面 CDN、不受 API 配额限制，从 Location 重定向目标里剥出 tag。两路都失败输出空串。
 latest_tag() {
-  curl -fsSL "$api_base/releases/latest" |
-    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+  tag="$(curl -fsSL "$api_base/releases/latest" 2>/dev/null |
+    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  if [ -n "$tag" ]; then
+    printf '%s\n' "$tag"
+    return 0
+  fi
+  curl -fsSL -o /dev/null -w '%{url_effective}' "$web_latest" 2>/dev/null |
+    sed -n 's#.*/releases/tag/\([^/?]*\).*#\1#p'
 }
 
 # 按 uname 映射平台/架构（macOS arm64 归一为 aarch64，x86_64 保持不变，ADR-0008）。
@@ -127,14 +136,14 @@ fi
 
 map_platform
 
-# 版本来源：-V/ASK_OPENCODE_VERSION 显式指定即跳过 releases/latest（ADR-0008），
-# API 失败时按错误退出并提示手动传版本。
+# 版本来源：-V/ASK_OPENCODE_VERSION 显式指定即跳过 releases/latest（ADR-0008）。
+# API 与 HTML 重定向两路都拿不到版本时按错误退出并提示手动传版本。
 if [ -n "$version" ]; then
   tag="$version"
 else
   tag="$(latest_tag)"
   [ -n "$tag" ] || {
-    echo "install.sh: 无法获取最新版本（GitHub API 不可用）" >&2
+    echo "install.sh: 无法获取最新版本（GitHub API 与 releases/latest 重定向均不可用）" >&2
     echo "install.sh: 请用 -V <版本> 或环境变量 ASK_OPENCODE_VERSION 手动指定版本" >&2
     exit 1
   }
