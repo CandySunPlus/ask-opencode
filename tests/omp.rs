@@ -93,6 +93,96 @@ fn generate_passes_json_mode_no_session_system_prompt_and_narrowing_flags_to_omp
 }
 
 #[test]
+fn generate_runs_omp_in_always_ask_mode_with_bash_as_the_only_builtin_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let omp = write_fake_omp(dir.path(), &[OMP_OK]);
+    let out = run_omp(&omp, &["generate", "list files"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let args = omp.args(1);
+    assert_eq!(
+        value_after(&args, "--approval-mode").as_deref(),
+        Some("always-ask")
+    );
+    assert_eq!(value_after(&args, "--tools").as_deref(), Some("bash"));
+    assert!(!args.iter().any(|arg| arg == "--auto-approve"), "{args:?}");
+}
+
+/// cmd-gen agent frontmatter 里 `bash:` 下的规则，按文件顺序取 `(模式, 动作)`。
+fn agent_bash_rules() -> Vec<(String, String)> {
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".opencode/agents/cmd-gen.md"),
+    )
+    .unwrap();
+    text.lines()
+        .skip_while(|line| *line != "  bash:")
+        .skip(1)
+        .take_while(|line| line.starts_with("    "))
+        .map(|line| {
+            let (pattern, action) = line.trim().rsplit_once(": ").unwrap();
+            (pattern.trim_matches('"').to_string(), action.to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn generate_passes_omp_a_bash_whitelist_mirroring_cmd_gen_agent_with_catch_all_deny() {
+    let dir = tempfile::tempdir().unwrap();
+    let omp = write_fake_omp(dir.path(), &[OMP_OK]);
+    let out = run_omp(&omp, &["generate", "list files"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let overlay = omp.config(1);
+    let mut expected: Vec<serde_json::Value> = agent_bash_rules()
+        .into_iter()
+        .map(|(pattern, action)| serde_json::json!({"match": pattern, "approval": action}))
+        .collect();
+    assert!(
+        expected.contains(&serde_json::json!({"match": "git status*", "approval": "allow"})),
+        "agent 白名单读取有误: {expected:?}"
+    );
+    expected.push(serde_json::json!({"match": "*", "approval": "deny"}));
+    assert_eq!(
+        overlay["bash"]["patterns"],
+        serde_json::Value::Array(expected)
+    );
+    assert_eq!(overlay["bash"]["allowCompoundCommands"], false);
+}
+
+#[test]
+fn generate_keeps_user_level_context_files_out_of_omp_and_reuses_overlay_in_correction_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let omp = write_fake_omp(
+        dir.path(),
+        &[
+            "echo hello\n---CANDIDATE---\nfoobar_nonexistent_xyz",
+            "echo fixed",
+        ],
+    );
+    let out = run_omp(&omp, &["generate", "list files"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(omp.calls(), 2);
+    let overlay = omp.config(1);
+    let disabled = overlay["disabledExtensions"]
+        .as_array()
+        .expect("缺 disabledExtensions");
+    for name in [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "GEMINI.md",
+        "copilot-instructions.md",
+    ] {
+        let id = serde_json::json!(format!("context-file:user:{name}"));
+        assert!(disabled.contains(&id), "缺 {id}: {disabled:?}");
+    }
+    assert!(
+        !disabled
+            .iter()
+            .any(|id| id.as_str().unwrap().starts_with("context-file:project:")),
+        "项目级上下文应保留: {disabled:?}"
+    );
+    assert_eq!(omp.config(2), overlay);
+}
+
+#[test]
 fn generate_uses_omp_when_config_file_backend_is_omp() {
     let dir = tempfile::tempdir().unwrap();
     let omp = write_fake_omp(dir.path(), &[OMP_OK]);
