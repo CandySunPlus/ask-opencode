@@ -193,11 +193,7 @@ pub fn request_from_log(log: &str) -> String {
 pub fn sha256_of(path: &Path) -> String {
     let use_shasum = Command::new("shasum").arg("--version").output().is_ok();
     let out = if use_shasum {
-        Command::new("shasum")
-            .args(["-a", "256"])
-            .arg(path)
-            .output()
-            .unwrap()
+        Command::new("shasum").args(["-a", "256"]).arg(path).output().unwrap()
     } else {
         Command::new("sha256sum").arg(path).output().unwrap()
     };

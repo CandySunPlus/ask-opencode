@@ -8,25 +8,6 @@ fn json_stdout(out: &std::process::Output) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
-#[test]
-fn generate_uses_omp_when_backend_env_is_omp() {
-    let dir = tempfile::tempdir().unwrap();
-    let omp = write_fake_omp(dir.path(), &[OMP_OK]);
-    let out = run_with_env(
-        &["generate", "list files"],
-        &[
-            ("ASK_OPENCODE_BACKEND", "omp"),
-            ("ASK_OPENCODE_OMP_BIN", omp.bin.to_str().unwrap()),
-        ],
-    );
-    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
-    assert_eq!(
-        json_stdout(&out),
-        serde_json::json!(["echo from-omp", "ls -la"])
-    );
-    assert_eq!(omp.calls(), 1);
-}
-
 /// 仓库 cmd-gen agent 文件去掉 frontmatter 后的正文（独立按文件格式切，不复用实现）。
 fn agent_body() -> String {
     let text = std::fs::read_to_string(
@@ -57,6 +38,32 @@ fn run_omp(omp: &FakeOmp, args: &[&str], extra: &[(&str, &str)]) -> std::process
     let mut envs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
     envs.extend_from_slice(extra);
     run_with_env(args, &envs)
+}
+
+/// 会记录自己是否被调用的 fake opencode：用来断言 omp 失败时没有回退到 opencode。
+fn opencode_tripwire(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let marker = dir.join("opencode-called");
+    let bin = write_fake_opencode(
+        dir,
+        &format!(
+            "touch \"{}\"\nprintf 'echo from-opencode\\n'",
+            marker.display()
+        ),
+    );
+    (bin, marker)
+}
+
+#[test]
+fn generate_uses_omp_when_backend_env_is_omp() {
+    let dir = tempfile::tempdir().unwrap();
+    let omp = write_fake_omp(dir.path(), &[OMP_OK]);
+    let out = run_omp(&omp, &["generate", "list files"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(
+        json_stdout(&out),
+        serde_json::json!(["echo from-omp", "ls -la"])
+    );
+    assert_eq!(omp.calls(), 1);
 }
 
 #[test]
@@ -163,19 +170,6 @@ fn generate_runs_correction_round_through_omp() {
         "{fix_request}"
     );
     assert!(omp.args(2).iter().any(|arg| arg == "--no-session"));
-}
-
-/// 会记录自己是否被调用的 fake opencode：用来断言 omp 失败时没有回退到 opencode。
-fn opencode_tripwire(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    let marker = dir.join("opencode-called");
-    let bin = write_fake_opencode(
-        dir,
-        &format!(
-            "touch \"{}\"\nprintf 'echo from-opencode\\n'",
-            marker.display()
-        ),
-    );
-    (bin, marker)
 }
 
 #[test]
@@ -290,4 +284,45 @@ fn generate_reports_omp_model_error_even_when_exit_code_is_zero() {
         "{}",
         stderr_str(&out)
     );
+}
+
+#[test]
+fn generate_rejects_unknown_backend_without_falling_back_to_opencode() {
+    let dir = tempfile::tempdir().unwrap();
+    let (opencode, marker) = opencode_tripwire(dir.path());
+    let cfg = dir.path().join("config.json");
+    std::fs::write(&cfg, r#"{"backend":"ompp"}"#).unwrap();
+    let out = run_with_env(
+        &["generate", "list files"],
+        &[
+            ("ASK_OPENCODE_CONFIG", cfg.to_str().unwrap()),
+            ("ASK_OPENCODE_BIN", opencode.to_str().unwrap()),
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(stderr_str(&out).contains("ompp"), "{}", stderr_str(&out));
+    assert!(!marker.exists(), "未知后端不应落到 opencode");
+}
+
+#[test]
+fn generate_with_omp_leaves_saved_opencode_session_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let omp = write_fake_omp(dir.path(), &[OMP_OK]);
+    let cfg = dir.path().join("config.json");
+    let state = dir.path().join("server.json");
+    let saved = r#"{"session_id":"ses-opencode-1"}"#;
+    std::fs::write(&state, saved).unwrap();
+    let out = run_omp(
+        &omp,
+        &["generate", "list files"],
+        &[
+            ("ASK_OPENCODE_CONFIG", cfg.to_str().unwrap()),
+            ("ASK_OPENCODE_REUSE_SESSION", "true"),
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let args = omp.args(1);
+    assert!(args.iter().any(|arg| arg == "--no-session"), "{args:?}");
+    assert!(!args.iter().any(|arg| arg.contains("ses-opencode-1")), "{args:?}");
+    assert_eq!(std::fs::read_to_string(&state).unwrap(), saved);
 }

@@ -1,4 +1,5 @@
 use crate::config::Config;
+use std::path::PathBuf;
 
 /// 一次生成调用的会话用法，为什么是三态而非可选 id 见 ADR-0009。复不复用常驻会话是
 /// generate 的共享策略，后端只照做（ADR-0007）。
@@ -37,15 +38,33 @@ pub trait Backend {
     fn generate(&self, request: &str, session: Session<'_>) -> Result<Reply, BackendError>;
 }
 
-/// 按配置选定后端；命令行给的 agent/model 优先于配置。选定后端不可用也不换另一个（ADR-0009）。
-pub fn select(config: &Config, agent: Option<&str>, model: Option<&str>) -> Box<dyn Backend> {
+/// 按配置选定后端；命令行给的 agent/model 优先于配置。未知后端直接报错、不落到默认后端
+/// （ADR-0009）。
+pub fn select(
+    config: &Config,
+    agent: Option<&str>,
+    model: Option<&str>,
+) -> Result<Box<dyn Backend>, String> {
     let model = model.or(config.model.as_deref()).map(str::to_string);
     match config.backend.as_str() {
-        "omp" => Box::new(crate::omp::Omp { model }),
-        _ => Box::new(crate::opencode::OpenCode {
+        "opencode" => Ok(Box::new(crate::opencode::OpenCode {
             agent: agent.unwrap_or(&config.agent).to_string(),
             model,
             resident: config.resident,
-        }),
+        })),
+        "omp" => Ok(Box::new(crate::omp::Omp { model })),
+        other => Err(format!("未知后端 {other:?}，可选 opencode / omp")),
     }
+}
+
+/// 解析后端可执行文件：`env_var` 显式指定则优先并校验存在，否则取 PATH 中的 `default`。
+pub fn resolve_bin(env_var: &str, default: &str) -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os(env_var) {
+        let path = PathBuf::from(path);
+        if !path.exists() {
+            return Err(format!("{env_var} 指向的文件不存在: {}", path.display()));
+        }
+        return Ok(path);
+    }
+    Ok(PathBuf::from(default))
 }

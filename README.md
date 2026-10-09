@@ -67,7 +67,7 @@ source /path/to/ask-opencode/zsh/ask-opencode.plugin.zsh
 - `sensitive_rules`：敏感信息过滤的扩展正则，叠加在内置黑名单之上。
 - `picker`：`skim`（内嵌）或 `fzf`（外部）。
 - `resident`：是否启用常驻 opencode serve（ADR-0004），仅对 opencode 生效。
-- `reuse_session`：是否复用同一个 opencode 会话（ADR-0007）。
+- `reuse_session`：是否启用常驻会话（ADR-0007），目前仅对 opencode 生效，omp 每次都开全新会话。
 
 环境变量逐个字段覆盖配置文件：`ASK_OPENCODE_BACKEND`、`ASK_OPENCODE_HISTORY_LIMIT`、`ASK_OPENCODE_INCLUDE_DIRSTACK`、`ASK_OPENCODE_INCLUDE_TOOLS`、`ASK_OPENCODE_SENSITIVE_RULES`（逗号分隔，追加到文件规则之上）、`ASK_OPENCODE_PICKER`、`ASK_OPENCODE_FZF_BIN`、`ASK_OPENCODE_RESIDENT`、`ASK_OPENCODE_REUSE_SESSION`。
 

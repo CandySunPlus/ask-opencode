@@ -29,7 +29,14 @@ fn session_for<'a>(config: &Config, session_id: Option<&'a str>, may_create: boo
 
 pub fn run(args: GenerateArgs) -> i32 {
     let config = Config::load();
-    let backend = crate::backend::select(&config, args.agent.as_deref(), args.model.as_deref());
+    let backend =
+        match crate::backend::select(&config, args.agent.as_deref(), args.model.as_deref()) {
+            Ok(backend) => backend,
+            Err(message) => {
+                eprintln!("generate: {message}");
+                return 1;
+            }
+        };
     let snapshot = ContextSnapshot::collect(&config);
     let request = format!(
         "{}\n\n请求：{}\n\n{}",

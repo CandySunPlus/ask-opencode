@@ -1,5 +1,4 @@
 use crate::backend::{Backend, BackendError, Reply, Session};
-use std::path::PathBuf;
 use std::process::Command;
 
 /// cmd-gen 正文：build.rs 编译期从 opencode agent 文件剥掉 frontmatter 取得（ADR-0009）。
@@ -13,12 +12,14 @@ pub struct Omp {
 
 impl Backend for Omp {
     fn generate(&self, request: &str, _session: Session<'_>) -> Result<Reply, BackendError> {
-        let bin = resolve_bin()?;
+        let bin = crate::backend::resolve_bin("ASK_OPENCODE_OMP_BIN", "omp")
+            .map_err(|message| BackendError::Unavailable { message })?;
         let mut cmd = Command::new(&bin);
         cmd.args(["--mode", "json", "--no-session"])
             .arg("--system-prompt")
             .arg(SYSTEM_PROMPT)
-            // 收窄注入，只读侦查与 opencode 同样严格（ADR-0009）；项目 AGENTS.md 保留。
+            // ADR-0009 只读侦查的收窄注入一步（项目 AGENTS.md 保留）；bash 白名单与审批模式
+            // 尚未接上，见该 ADR 末段。
             .args(["--no-skills", "--no-rules", "--no-extensions"]);
         if let Some(model) = self.model.as_deref().filter(|model| !model.is_empty()) {
             cmd.arg("--model").arg(model);
@@ -39,20 +40,6 @@ impl Backend for Omp {
             session_id: None,
         })
     }
-}
-
-/// omp 可执行文件：ASK_OPENCODE_OMP_BIN 显式指定则优先并校验存在，否则取 PATH 中的 `omp`。
-fn resolve_bin() -> Result<PathBuf, BackendError> {
-    if let Some(path) = std::env::var_os("ASK_OPENCODE_OMP_BIN") {
-        let path = PathBuf::from(path);
-        if !path.exists() {
-            return Err(BackendError::Unavailable {
-                message: format!("ASK_OPENCODE_OMP_BIN 指向的文件不存在: {}", path.display()),
-            });
-        }
-        return Ok(path);
-    }
-    Ok(PathBuf::from("omp"))
 }
 
 /// 从 NDJSON 的 `agent_end` 取最后一条 assistant 消息，把它的 text 内容按序拼成候选原文；

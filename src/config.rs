@@ -26,7 +26,7 @@ pub struct Config {
     /// 是否启用常驻 opencode serve（ADR-0004）：首次调用自动拉起、后续请求走 serve 的 HTTP API 复用。
     /// omp 后端不生效（ADR-0009）。
     pub resident: bool,
-    /// 是否复用同一个 opencode session（ADR-0007）：默认开，关闭时每次请求开全新会话。
+    /// 是否启用常驻会话（ADR-0007）：默认开，关闭时每次请求开全新会话。omp 后端暂不生效。
     pub reuse_session: bool,
 }
 
