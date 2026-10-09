@@ -143,16 +143,8 @@ struct InvokeOutput {
 
 /// 解析 opencode 可执行文件路径：ASK_OPENCODE_BIN 显式指定则优先并校验存在，否则回落 PATH。
 pub fn resolve_bin() -> Result<PathBuf, OpenCodeError> {
-    if let Some(path) = std::env::var_os("ASK_OPENCODE_BIN") {
-        let path = PathBuf::from(path);
-        if !path.exists() {
-            return Err(OpenCodeError {
-                message: format!("ASK_OPENCODE_BIN 指向的文件不存在: {}", path.display()),
-            });
-        }
-        return Ok(path);
-    }
-    Ok(PathBuf::from("opencode"))
+    crate::backend::resolve_bin("ASK_OPENCODE_BIN", "opencode")
+        .map_err(|message| OpenCodeError { message })
 }
 
 /// 按需挑路径发起一次请求：常驻开关打开且 serve 可用时走 HTTP API，否则回退 `opencode run`。

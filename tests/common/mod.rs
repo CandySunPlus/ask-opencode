@@ -204,3 +204,78 @@ pub fn sha256_of(path: &Path) -> String {
         .unwrap()
         .to_string()
 }
+
+/// fake omp shim（ADR-0009）：每次调用把 argv 记到 `omp-args.<序号>`（`@@@` 分隔），stdout 吐
+/// 第 N 个回复拼成的 `omp --mode json` NDJSON；调用次数多于回复数时重复最后一个。
+pub struct FakeOmp {
+    pub bin: PathBuf,
+    dir: PathBuf,
+}
+
+impl FakeOmp {
+    /// 已发生的调用次数。
+    pub fn calls(&self) -> usize {
+        std::fs::read_to_string(self.dir.join("omp.count"))
+            .map(|n| n.trim().parse().unwrap())
+            .unwrap_or(0)
+    }
+
+    /// 第 `n` 次（从 1 起）调用收到的 argv。
+    pub fn args(&self, n: usize) -> Vec<String> {
+        let log = std::fs::read_to_string(self.dir.join(format!("omp-args.{n}"))).unwrap();
+        log.split("\n@@@\n")
+            .filter(|chunk| !chunk.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+/// 在 `dir` 下写 fake omp，`responses[i]` 是第 i+1 次调用的 assistant 文本。
+pub fn write_fake_omp(dir: &Path, responses: &[&str]) -> FakeOmp {
+    assert!(!responses.is_empty());
+    for (index, text) in responses.iter().enumerate() {
+        std::fs::write(
+            dir.join(format!("omp-resp.{}", index + 1)),
+            omp_ndjson(text),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        dir.join("omp-resp.last"),
+        omp_ndjson(responses.last().unwrap()),
+    )
+    .unwrap();
+    let d = dir.display();
+    let script = format!(
+        "n=$(cat \"{d}/omp.count\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"{d}/omp.count\"\n\
+         for a in \"$@\"; do printf '%s\\n@@@\\n' \"$a\"; done > \"{d}/omp-args.$n\"\n\
+         f=\"{d}/omp-resp.$n\"; [ -f \"$f\" ] || f=\"{d}/omp-resp.last\"; cat \"$f\""
+    );
+    FakeOmp {
+        bin: write_fake_bin(dir, "omp", &script),
+        dir: dir.to_path_buf(),
+    }
+}
+
+/// 仿 `omp --mode json` 的 NDJSON：session/agent_start 起头，`agent_end` 收尾，最后一条
+/// assistant 消息的 text 内容为 `text`（前面带一条 thinking 与一条更早的 assistant 消息作干扰）。
+pub fn omp_ndjson(text: &str) -> String {
+    let events = [
+        serde_json::json!({"type": "session", "id": "omp-sess-1", "cwd": "/tmp"}),
+        serde_json::json!({"type": "agent_start"}),
+        serde_json::json!({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "noise"}}),
+        serde_json::json!({
+            "type": "agent_end",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "req"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "早先一轮的文本"}], "stopReason": "toolUse"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "想一想"},
+                    {"type": "text", "text": text}
+                ], "stopReason": "stop"}
+            ],
+            "isTerminal": true
+        }),
+    ];
+    events.iter().map(|event| format!("{event}\n")).collect()
+}
