@@ -1,6 +1,6 @@
 //! 把 cmd-gen agent 文件剥掉 frontmatter 后的正文写进 OUT_DIR，供 omp 后端经
 //! `--system-prompt` 传入（ADR-0009：两个后端共用同一份正文）；frontmatter 里的 bash 白名单
-//! 也一并抽出，作为 omp 只读叠加配置的来源，两个后端共用同一份白名单。
+//! 也一并抽出（deny 挪到 allow 前面），作为 omp 只读叠加配置的来源，两个后端共用同一份白名单。
 
 use std::path::Path;
 
@@ -13,8 +13,10 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     std::fs::write(Path::new(&out_dir).join("cmd_gen_prompt.md"), body)
         .expect("写 cmd-gen 正文失败");
-    let rules = bash_rules(&text);
+    let mut rules = bash_rules(&text);
     assert!(!rules.is_empty(), "cmd-gen agent 文件缺 bash 白名单");
+    // 这一步就是 omp 下 deny 优先的保证；稳定排序不打乱相对顺序（ADR-0009）。
+    rules.sort_by_key(|(_, action)| action != "deny");
     let lines: Vec<String> = rules
         .iter()
         .map(|(pattern, action)| format!("{pattern}\t{action}\n"))
