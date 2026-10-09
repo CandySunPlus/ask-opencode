@@ -679,7 +679,8 @@ fn reuse_session_disabled_via_config_skips_json_path() {
     assert!(
         !dir.path().join("server.json").exists(),
         "关闭复用不应落盘会话状态"
-    );    assert!(
+    );
+    assert!(
         !stderr_str(&out).contains("会话 id"),
         "一次性会话不应提示: {}",
         stderr_str(&out)

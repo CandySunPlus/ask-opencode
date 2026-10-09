@@ -48,14 +48,14 @@ pub fn run(args: GenerateArgs) -> i32 {
     let session_id = reuse_session_id(&config, backend.as_ref(), &session_key);
     // 会话失效自动重建（ADR-0007）：清掉旧 id，新建会话重试一次。
     let session = session_for(&config, session_id.as_deref(), true);
-    let mut creating = matches!(session, Session::New);
+    let mut new_session = matches!(session, Session::New);
     let result = match backend.generate(&request, session) {
         Err(BackendError::SessionExpired) => {
             if let Err(err) = crate::state::clear_session_id(backend.name(), &session_key) {
                 // 清不掉旧 id 不中断重建，stderr 提示便于诊断。
                 eprintln!("resident: {}", err.message);
             }
-            creating = true;
+            new_session = true;
             backend.generate(&request, Session::New)
         }
         other => other,
@@ -88,8 +88,8 @@ pub fn run(args: GenerateArgs) -> i32 {
                 eprintln!("resident: {}", err.message);
             }
         }
-        // 后端各自抓 id 的方式不同，没抓到的提示统一放这里，两个后端才一致。
-        None if creating => {
+        // 提示统一放在这里而非各后端（ADR-0009）。
+        None if new_session => {
             eprintln!("resident: 后端没返回会话 id，常驻会话没建立，下次请求会再新建会话")
         }
         None => {}

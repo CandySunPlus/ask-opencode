@@ -112,6 +112,27 @@ fn second_request_in_same_dir_resumes_first_session() {
     assert!(!has_flag(&second, "--no-session"), "{second:?}");
 }
 
+/// 续接的会话失效、重建时新建会话又没拿到 id：同样提示，旧 id 已清掉、不落新 id。
+#[test]
+fn rebuilt_session_without_header_warns() {
+    let env = Env::new();
+    let omp = env.omp(&[OMP_OK]);
+    env.generate_in("a", &omp);
+    omp.expire_session("omp-sess-1");
+    omp.drop_session_header(3);
+
+    let out = env.generate_in("a", &omp);
+
+    assert_eq!(omp.calls(), 3);
+    let stderr = stderr_str(&out);
+    assert!(stderr.contains("没返回会话 id"), "{stderr}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        json!(["echo from-omp", "ls -la"])
+    );
+    assert!(env.omp_sessions().is_null(), "{}", env.read_state());
+}
+
 /// 一次性会话（关了常驻会话）与续接会话都不提示「没返回会话 id」。
 #[test]
 fn oneshot_and_resume_never_warn_missing_session_id() {
