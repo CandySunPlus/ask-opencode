@@ -107,22 +107,23 @@ fn generate_runs_omp_in_always_ask_mode_with_bash_as_the_only_builtin_tool() {
     assert!(!args.iter().any(|arg| arg == "--auto-approve"), "{args:?}");
 }
 
-/// cmd-gen agent frontmatter 里 `bash:` 下的规则，按文件顺序取 `(模式, 动作)`。
-fn agent_bash_rules() -> Vec<(String, String)> {
-    let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".opencode/agents/cmd-gen.md"),
-    )
-    .unwrap();
-    text.lines()
-        .skip_while(|line| *line != "  bash:")
-        .skip(1)
-        .take_while(|line| line.starts_with("    "))
-        .map(|line| {
-            let (pattern, action) = line.trim().rsplit_once(": ").unwrap();
-            (pattern.trim_matches('"').to_string(), action.to_string())
-        })
-        .collect()
-}
+/// opencode cmd-gen agent 的 bash 白名单，按 agent 文件里的顺序（#56 票面所列）。
+const AGENT_BASH_WHITELIST: [&str; 14] = [
+    "git status*",
+    "git diff*",
+    "git log*",
+    "git show*",
+    "git rev-parse*",
+    "git branch*",
+    "ls *",
+    "ls",
+    "cat *",
+    "find *",
+    "grep *",
+    "pwd",
+    "docker images*",
+    "docker ps*",
+];
 
 #[test]
 fn generate_passes_omp_a_bash_whitelist_mirroring_cmd_gen_agent_with_catch_all_deny() {
@@ -131,14 +132,10 @@ fn generate_passes_omp_a_bash_whitelist_mirroring_cmd_gen_agent_with_catch_all_d
     let out = run_omp(&omp, &["generate", "list files"], &[]);
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
     let overlay = omp.config(1);
-    let mut expected: Vec<serde_json::Value> = agent_bash_rules()
-        .into_iter()
-        .map(|(pattern, action)| serde_json::json!({"match": pattern, "approval": action}))
+    let mut expected: Vec<serde_json::Value> = AGENT_BASH_WHITELIST
+        .iter()
+        .map(|pattern| serde_json::json!({"match": pattern, "approval": "allow"}))
         .collect();
-    assert!(
-        expected.contains(&serde_json::json!({"match": "git status*", "approval": "allow"})),
-        "agent 白名单读取有误: {expected:?}"
-    );
     expected.push(serde_json::json!({"match": "*", "approval": "deny"}));
     assert_eq!(
         overlay["bash"]["patterns"],

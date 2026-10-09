@@ -38,8 +38,7 @@ impl Backend for Omp {
         cmd.args(["--mode", "json", "--no-session"])
             .arg("--system-prompt")
             .arg(SYSTEM_PROMPT)
-            // ADR-0009 只读侦查：收窄注入（项目 AGENTS.md 保留）；非 read 档工具（MCP、写文件、
-            // eval）在 always-ask 下无 UI 可批、直接失败；内置工具只留 bash，白名单见叠加配置。
+            // ADR-0009 只读侦查四件套：收窄注入、always-ask、只留 bash、只读叠加配置。
             .args(["--no-skills", "--no-rules", "--no-extensions"])
             .args(["--approval-mode", "always-ask", "--tools", "bash"])
             .arg("--config")
@@ -65,17 +64,13 @@ impl Backend for Omp {
     }
 }
 
-/// 只读叠加配置（ADR-0009）：bash 白名单逐条照搬 cmd-gen agent，末尾 `*` 拒绝兜底——omp 首条
-/// 命中生效、未命中默认放行，少了兜底就等于没有白名单。
+/// 只读叠加配置：bash 白名单逐条照搬 cmd-gen agent、末尾 `*` 拒绝兜底，并屏蔽用户级上下文
+/// （ADR-0009）。
 fn readonly_overlay() -> serde_json::Value {
     let mut patterns: Vec<serde_json::Value> = BASH_RULES
         .lines()
         .filter_map(|line| line.split_once('\t'))
-        .map(|(pattern, action)| {
-            // opencode 的 ask 在 omp 里叫 prompt。
-            let approval = if action == "ask" { "prompt" } else { action };
-            serde_json::json!({"match": pattern, "approval": approval})
-        })
+        .map(|(pattern, action)| serde_json::json!({"match": pattern, "approval": action}))
         .collect();
     patterns.push(serde_json::json!({"match": "*", "approval": "deny"}));
     serde_json::json!({
@@ -85,7 +80,7 @@ fn readonly_overlay() -> serde_json::Value {
     })
 }
 
-/// 把只读叠加配置写到状态文件同目录并返回路径；先写临时文件再改名，多个 shell 并发也不会读到半截。
+/// 把只读叠加配置原子写到状态文件同目录并返回路径（ADR-0009）。
 fn write_readonly_overlay() -> Result<PathBuf, BackendError> {
     let unavailable = |message: String| BackendError::Unavailable { message };
     let path = crate::config::state_path()
