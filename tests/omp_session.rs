@@ -112,6 +112,53 @@ fn second_request_in_same_dir_resumes_first_session() {
     assert!(!has_flag(&second, "--no-session"), "{second:?}");
 }
 
+/// 续接的会话失效、重建时新建会话又没拿到 id：同样提示，旧 id 已清掉、不落新 id。
+#[test]
+fn rebuilt_session_without_header_warns() {
+    let env = Env::new();
+    let omp = env.omp(&[OMP_OK]);
+    env.generate_in("a", &omp);
+    omp.expire_session("omp-sess-1");
+    omp.drop_session_header(3);
+
+    let out = env.generate_in("a", &omp);
+
+    assert_eq!(omp.calls(), 3);
+    let stderr = stderr_str(&out);
+    assert!(stderr.contains("没返回会话 id"), "{stderr}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        json!(["echo from-omp", "ls -la"])
+    );
+    assert!(env.omp_sessions().is_null(), "{}", env.read_state());
+}
+
+/// 一次性会话（关了常驻会话）与续接会话都不提示「没返回会话 id」。
+#[test]
+fn oneshot_and_resume_never_warn_missing_session_id() {
+    let env = Env::new();
+    let omp = env.omp(&[OMP_OK]);
+    omp.drop_session_header(2);
+    omp.drop_session_header(3);
+
+    env.generate_in("a", &omp);
+    let resumed = env.generate_in("a", &omp);
+    assert!(has_flag(&omp.args(2), "--resume"));
+    let stderr = stderr_str(&resumed);
+    assert!(!stderr.contains("会话 id"), "{stderr}");
+
+    let oneshot = env.run_in(
+        &env.path("b"),
+        &["generate", "list files"],
+        &omp,
+        &[("ASK_OPENCODE_REUSE_SESSION", "false")],
+    );
+    assert!(oneshot.status.success(), "{}", stderr_str(&oneshot));
+    assert!(has_flag(&omp.args(3), "--no-session"));
+    let stderr = stderr_str(&oneshot);
+    assert!(!stderr.contains("会话 id"), "{stderr}");
+}
+
 #[test]
 fn correction_round_resumes_the_same_session() {
     let env = Env::new();
@@ -351,4 +398,47 @@ fn unreadable_state_file_is_backed_up_with_warning_before_rewrite() {
             json!({path_str(&env.path("a")): "omp-sess-1"})
         );
     }
+}
+
+/// 已有备份时再坏一次：旧备份不动，新备份取下一个空闲序号名，stderr 写的是这次的路径。
+#[test]
+fn second_corruption_backs_up_to_next_free_name() {
+    let env = Env::new();
+    let omp = env.omp(&[OMP_OK]);
+    let old_backup = env.path("state/server.json.corrupt");
+    std::fs::write(&old_backup, "old broken").unwrap();
+    std::fs::write(env.state_file(), "{new broken").unwrap();
+
+    let out = env.generate_in("a", &omp);
+
+    let stderr = stderr_str(&out);
+    let backup = env.path("state/server.json.corrupt.1");
+    assert!(stderr.contains(&path_str(&backup)), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&old_backup).unwrap(), "old broken");
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), "{new broken");
+    assert_eq!(
+        env.omp_sessions(),
+        json!({path_str(&env.path("a")): "omp-sess-1"})
+    );
+}
+
+/// 新建会话拿不到 id（NDJSON 首行没有 session header）：stderr 提示常驻会话没建立，不落盘，
+/// 候选照常输出。
+#[test]
+fn new_session_without_header_warns_and_persists_nothing() {
+    let env = Env::new();
+    let omp = env.omp(&[OMP_OK]);
+    omp.drop_session_header(1);
+
+    let out = env.generate_in("a", &omp);
+
+    let stderr = stderr_str(&out);
+    assert!(stderr.contains("resident:"), "{stderr}");
+    assert!(stderr.contains("没返回会话 id"), "{stderr}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        json!(["echo from-omp", "ls -la"])
+    );
+    let state = std::fs::read_to_string(env.state_file()).unwrap_or_default();
+    assert!(!state.contains("sessions"), "{state}");
 }

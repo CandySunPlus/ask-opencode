@@ -211,7 +211,8 @@ pub fn sha256_of(path: &Path) -> String {
 ///
 /// 会话：NDJSON 首行 session header 的 id 在 `--resume <id>` 时就是该 id，否则是
 /// `omp-sess-<序号>`。`--resume` 一个被 `expire_session` 标记的 id 时，仿真实 omp 在 stderr 报
-/// `Session "<id>" not found.` 并以 1 退出；`fail_call` 让第 N 次调用以 2 退出。
+/// `Session "<id>" not found.` 并以 1 退出；`fail_call` 让第 N 次调用以 2 退出；
+/// `drop_session_header` 让第 N 次调用不吐 session header。
 pub struct FakeOmp {
     pub bin: PathBuf,
     dir: PathBuf,
@@ -244,6 +245,11 @@ impl FakeOmp {
     /// 让 `--resume <id>` 找不到这个会话。
     pub fn expire_session(&self, id: &str) {
         std::fs::write(self.dir.join(format!("omp-dead.{id}")), "").unwrap();
+    }
+
+    /// 让第 `n` 次调用的 NDJSON 没有首行 session header。
+    pub fn drop_session_header(&self, n: usize) {
+        std::fs::write(self.dir.join(format!("omp-noheader.{n}")), "").unwrap();
     }
 
     /// 让第 `n` 次调用把 `stderr` 写到 stderr 并以 2 退出。
@@ -279,7 +285,7 @@ pub fn write_fake_omp(dir: &Path, responses: &[&str]) -> FakeOmp {
          done\n\
          if [ -f \"{d}/omp-dead.$id\" ]; then printf 'Error: Session \"%s\" not found.\\n' \"$id\" >&2; exit 1; fi\n\
          if [ -f \"{d}/omp-fail.$n\" ]; then cat \"{d}/omp-fail.$n\" >&2; exit 2; fi\n\
-         printf '{{\"type\":\"session\",\"id\":\"%s\",\"cwd\":\"%s\"}}\\n' \"$id\" \"$PWD\"\n\
+         [ -f \"{d}/omp-noheader.$n\" ] || printf '{{\"type\":\"session\",\"id\":\"%s\",\"cwd\":\"%s\"}}\\n' \"$id\" \"$PWD\"\n\
          f=\"{d}/omp-resp.$n\"; [ -f \"$f\" ] || f=\"{d}/omp-resp.last\"; cat \"$f\""
     );
     FakeOmp {

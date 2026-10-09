@@ -67,8 +67,8 @@ fn load(path: &Path) -> Option<StateFile> {
     }
 }
 
-/// 读出来准备改写的状态：读不出的文件先挪到 `<文件名>.corrupt` 再按空状态重写，免得其他
-/// 后端的分区被悄悄覆盖掉；挪不动也要在 stderr 说一声。文件读失败则不写。
+/// 读出来准备改写的状态：读不出的文件先挪到空闲的备份名（见 `free_backup_path`）再按空状态
+/// 重写，免得其他后端的分区被悄悄覆盖掉；挪不动也要在 stderr 说一声。文件读失败则不写。
 fn load_for_write(path: &Path) -> Result<StateFile, StateError> {
     match read(path) {
         Stored::Parsed(state) => return Ok(state),
@@ -80,9 +80,7 @@ fn load_for_write(path: &Path) -> Result<StateFile, StateError> {
         }
         Stored::Unreadable => {}
     }
-    let mut backup = path.as_os_str().to_os_string();
-    backup.push(".corrupt");
-    let backup = PathBuf::from(backup);
+    let backup = free_backup_path(path);
     match std::fs::rename(path, &backup) {
         Ok(()) => eprintln!(
             "state: 状态文件 {} 读不出，已挪到 {} 后重写，其他后端的会话需重新建立",
@@ -95,6 +93,21 @@ fn load_for_write(path: &Path) -> Result<StateFile, StateError> {
         ),
     }
     Ok(StateFile::new())
+}
+
+/// 依次试 `<文件名>.corrupt`、`.corrupt.1`、`.corrupt.2`…，取第一个不存在的，已有备份一个都
+/// 不覆盖。
+fn free_backup_path(path: &Path) -> PathBuf {
+    let backup = |suffix: String| {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    std::iter::once(".corrupt".to_string())
+        .chain((1..).map(|n| format!(".corrupt.{n}")))
+        .map(backup)
+        .find(|candidate| !candidate.exists())
+        .expect("序号无上限，总能找到空闲名")
 }
 
 /// 旧格式就地读作 opencode 分区，下次写入即转成新格式（ADR-0009）：有顶层旧字段、又没有
