@@ -1,6 +1,7 @@
 use crate::config::Config;
 
-/// 一次生成调用的会话用法。复不复用常驻会话是 generate 的共享策略，后端只照做（ADR-0007）。
+/// 一次生成调用的会话用法，为什么是三态而非可选 id 见 ADR-0009。复不复用常驻会话是
+/// generate 的共享策略，后端只照做（ADR-0007）。
 #[derive(Debug, Clone, Copy)]
 pub enum Session<'a> {
     /// 不复用会话：每次新会话，不需要知道它的 id。
