@@ -5,9 +5,11 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// 调用 opencode 时使用的 agent。
+    /// 生成用的后端：`opencode`（默认）或 `omp`（ADR-0009）。
+    pub backend: String,
+    /// 调用 opencode 时使用的 agent；omp 后端不生效。
     pub agent: String,
-    /// 调用 opencode 时使用的模型（provider/model），空则用 opencode 默认。
+    /// 生成用的模型，由当前后端解释，空则用后端自己的默认（ADR-0009）。
     pub model: Option<String>,
     /// 上下文快照注入的命令历史条数上限（默认 20）。
     pub history_limit: usize,
@@ -22,6 +24,7 @@ pub struct Config {
     /// 外部 fzf 可执行文件路径；仅在 `picker` 为 `fzf` 时使用。
     pub fzf_bin: String,
     /// 是否启用常驻 opencode serve（ADR-0004）：首次调用自动拉起、后续请求走 serve 的 HTTP API 复用。
+    /// omp 后端不生效（ADR-0009）。
     pub resident: bool,
     /// 是否复用同一个 opencode session（ADR-0007）：默认开，关闭时每次请求开全新会话。
     pub reuse_session: bool,
@@ -30,6 +33,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            backend: "opencode".to_string(),
             agent: "cmd-gen".to_string(),
             model: None,
             history_limit: 20,
@@ -78,6 +82,11 @@ pub fn state_path() -> Option<PathBuf> {
 
 /// 环境变量按字段覆盖配置；解析失败时保留文件里的值。
 fn apply_env_overrides(config: &mut Config) {
+    if let Some(value) = std::env::var_os("ASK_OPENCODE_BACKEND")
+        && let Some(backend) = parse_backend(&value)
+    {
+        config.backend = backend;
+    }
     if let Some(value) = std::env::var_os("ASK_OPENCODE_HISTORY_LIMIT")
         && let Ok(limit) = value.to_string_lossy().parse::<usize>()
     {
@@ -119,6 +128,12 @@ fn apply_env_overrides(config: &mut Config) {
     {
         config.reuse_session = on;
     }
+}
+
+/// 解析后端环境变量：只接受已知后端，非法值忽略（沿用配置/默认）。
+fn parse_backend(value: &std::ffi::OsStr) -> Option<String> {
+    let backend = value.to_string_lossy().trim().to_string();
+    matches!(backend.as_str(), "opencode" | "omp").then_some(backend)
 }
 
 /// 解析选择器环境变量：只接受已知实现，非法值忽略（沿用配置/默认）。

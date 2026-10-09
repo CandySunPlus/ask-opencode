@@ -13,7 +13,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// 调用 opencode 为一个请求生成候选命令
+    /// 调用后端为一个请求生成候选命令
     Generate(GenerateArgs),
     /// 按分隔行契约把候选文本切块为结构化候选
     Parse(ParseArgs),
@@ -31,11 +31,11 @@ pub struct GenerateArgs {
     #[arg(value_name = "REQUEST")]
     pub request: String,
 
-    /// 使用的 opencode agent，覆盖配置里的默认值
+    /// 使用的 opencode agent，覆盖配置里的默认值；omp 后端不生效
     #[arg(long)]
     pub agent: Option<String>,
 
-    /// 使用的模型（provider/model），覆盖配置里的默认值
+    /// 使用的模型，由当前后端解释，覆盖配置里的默认值
     #[arg(long)]
     pub model: Option<String>,
 }

@@ -37,11 +37,15 @@ pub trait Backend {
     fn generate(&self, request: &str, session: Session<'_>) -> Result<Reply, BackendError>;
 }
 
-/// 按配置选定后端；命令行给的 agent/model 优先于配置。
+/// 按配置选定后端；命令行给的 agent/model 优先于配置。选定后端不可用也不换另一个（ADR-0009）。
 pub fn select(config: &Config, agent: Option<&str>, model: Option<&str>) -> Box<dyn Backend> {
-    Box::new(crate::opencode::OpenCode {
-        agent: agent.unwrap_or(&config.agent).to_string(),
-        model: model.or(config.model.as_deref()).map(str::to_string),
-        resident: config.resident,
-    })
+    let model = model.or(config.model.as_deref()).map(str::to_string);
+    match config.backend.as_str() {
+        "omp" => Box::new(crate::omp::Omp { model }),
+        _ => Box::new(crate::opencode::OpenCode {
+            agent: agent.unwrap_or(&config.agent).to_string(),
+            model,
+            resident: config.resident,
+        }),
+    }
 }

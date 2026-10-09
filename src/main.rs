@@ -5,6 +5,7 @@ mod context;
 mod filter;
 mod generate;
 mod io;
+mod omp;
 mod opencode;
 mod parse;
 mod picker;

@@ -1,4 +1,5 @@
 {
+  "backend": "opencode",
   "agent": "cmd-gen",
   "model": "",
   "history_limit": 20,
