@@ -11,11 +11,14 @@ fn bash_rules() -> Vec<(String, String)> {
         .skip(1)
         .take_while(|line| line.starts_with("    "))
         .map(|line| {
-            let (pattern, action) = line.trim().rsplit_once(": ").unwrap();
+            let (pattern, action) = line
+                .trim()
+                .rsplit_once(": ")
+                .unwrap_or_else(|| panic!("bash 规则行格式不对: {line}"));
             (pattern.trim_matches('"').to_string(), action.to_string())
         })
         .collect();
-    assert!(!rules.is_empty(), "agent 文件缺 bash 白名单");
+    assert!(!rules.is_empty(), "agent 文件缺 bash 规则");
     rules
 }
 
@@ -67,6 +70,12 @@ fn bash_denies_git_output_and_redirection_after_every_allow() {
         .iter()
         .rposition(|(_, action)| action == "allow")
         .unwrap();
+    assert!(
+        rules[..last_allow]
+            .iter()
+            .all(|(_, action)| action == "allow"),
+        "deny 只能写在全部 allow 之后：{rules:?}"
+    );
     let denies: Vec<&str> = rules[last_allow + 1..]
         .iter()
         .map(|(pattern, action)| {

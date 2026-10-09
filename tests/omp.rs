@@ -136,7 +136,7 @@ const AGENT_BASH_ALLOW: [&str; 21] = [
 ];
 
 #[test]
-fn generate_passes_omp_a_bash_whitelist_with_denies_first_then_allows_then_catch_all_deny() {
+fn generate_passes_omp_bash_rules_with_denies_first_then_allows_then_catch_all_deny() {
     let dir = tempfile::tempdir().unwrap();
     let omp = write_fake_omp(dir.path(), &[OMP_OK]);
     let out = run_omp(&omp, &["generate", "list files"], &[]);
