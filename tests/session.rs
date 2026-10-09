@@ -323,6 +323,11 @@ fn second_request_skips_json_first_path() {
 
     let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
     assert_cold_session_reuse_args(&args);
+    assert!(
+        !stderr_str(&second).contains("会话 id"),
+        "续接会话不应提示: {}",
+        stderr_str(&second)
+    );
 }
 
 /// 冷启动（resident=false）会话复用回归（ADR-0007）：连续请求全程不拉起 serve、
@@ -674,6 +679,10 @@ fn reuse_session_disabled_via_config_skips_json_path() {
     assert!(
         !dir.path().join("server.json").exists(),
         "关闭复用不应落盘会话状态"
+    );    assert!(
+        !stderr_str(&out).contains("会话 id"),
+        "一次性会话不应提示: {}",
+        stderr_str(&out)
     );
 }
 
@@ -1291,5 +1300,35 @@ fi
         args.matches("--session").count(),
         0,
         "两次请求都不应带 --session：{args}"
+    );
+}
+
+/// 冷启动新建会话时 json 事件里没有 `sessionID`：stderr 提示常驻会话没建立，不落盘，候选照常出。
+#[test]
+fn first_request_without_session_id_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = write_fake_opencode(
+        dir.path(),
+        r#"
+for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
+printf '%s\n' '{"type":"text","timestamp":1,"part":{"id":"p1","type":"text","text":"echo hello\n---CANDIDATE---\nls -la\n"}}'
+"#,
+    );
+    let envs = session_envs(dir.path(), &shim, &[("ASK_OPENCODE_RESIDENT", "false")]);
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let stderr = stderr_str(&out);
+    assert!(stderr.contains("resident:"), "{stderr}");
+    assert!(stderr.contains("没返回会话 id"), "{stderr}");
+    assert_eq!(
+        json_stdout(&out),
+        serde_json::json!(["echo hello", "ls -la"])
+    );
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    assert!(has_pair(&args, "--format", "json"), "应走新建会话: {args}");
+    assert!(
+        !dir.path().join("server.json").exists(),
+        "没拿到 id 不应落盘"
     );
 }
