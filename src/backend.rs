@@ -1,0 +1,46 @@
+use crate::config::Config;
+
+/// 一次生成调用的会话用法。复不复用常驻会话是 generate 的共享策略，后端只照做（ADR-0007）。
+#[derive(Debug, Clone, Copy)]
+pub enum Session<'a> {
+    /// 不复用会话：每次新会话，不需要知道它的 id。
+    Oneshot,
+    /// 新建会话并带回 id 供落盘（常驻会话首次路径）。
+    New,
+    /// 续接已落盘的会话。
+    Resume(&'a str),
+}
+
+/// 后端的一次成功回复。
+#[derive(Debug)]
+pub struct Reply {
+    /// 候选原文，交给 ADR-0002 分隔行契约解析。
+    pub text: String,
+    /// `Session::New` 新建的会话 id；其余用法恒为 None，抓不到 id 也为 None。
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum BackendError {
+    /// 续接的会话已失效，generate 清掉 id 后新建会话重试一次（ADR-0007）。
+    SessionExpired,
+    /// 后端跑了但失败：原样回显它的错误输出、透传退出码。
+    Failed { exit_code: i32, stderr: String },
+    /// 后端没能跑起来或调用中断，带一句给人看的错误。
+    Unavailable { message: String },
+}
+
+/// 后端（见 `CONTEXT.md`「后端」、ADR-0009）：冷启动还是常驻、会话 id 从哪抓、
+/// 何为会话失效，都由实现自己决定。
+pub trait Backend {
+    fn generate(&self, request: &str, session: Session<'_>) -> Result<Reply, BackendError>;
+}
+
+/// 按配置选定后端；命令行给的 agent/model 优先于配置。
+pub fn select(config: &Config, agent: Option<&str>, model: Option<&str>) -> Box<dyn Backend> {
+    Box::new(crate::opencode::OpenCode {
+        agent: agent.unwrap_or(&config.agent).to_string(),
+        model: model.or(config.model.as_deref()).map(str::to_string),
+        resident: config.resident,
+    })
+}

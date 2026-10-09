@@ -1,7 +1,116 @@
-use crate::config::Config;
+use crate::backend::{Backend, BackendError, Reply, Session};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
+
+/// opencode 对已失效会话的硬失败签名（退出码 1 + 这条 stderr，实测见 ADR-0007）。
+const SESSION_NOT_FOUND: &str = "Session not found";
+
+/// 后端的 opencode 实现（ADR-0009）：常驻开关打开且 serve 可用时走 HTTP API，否则 `opencode run`。
+pub struct OpenCode {
+    pub agent: String,
+    pub model: Option<String>,
+    pub resident: bool,
+}
+
+impl Backend for OpenCode {
+    fn generate(&self, request: &str, session: Session<'_>) -> Result<Reply, BackendError> {
+        // 常驻会话（ADR-0007）：新建会话走 json 首次路径抓 id，其余用 default 格式。
+        let (format, session_id) = match session {
+            Session::Oneshot => (OutputFormat::Default, None),
+            Session::New => (OutputFormat::Json, None),
+            Session::Resume(id) => (OutputFormat::Default, Some(id)),
+        };
+        let output = invoke(
+            request,
+            &self.agent,
+            self.model.as_deref(),
+            self.resident,
+            format,
+            session_id,
+        )
+        .map_err(|err| BackendError::Unavailable {
+            message: err.message,
+        })?;
+        if !output.success {
+            if session_id.is_some() && session_not_found(&output) {
+                return Err(BackendError::SessionExpired);
+            }
+            return Err(BackendError::Failed {
+                exit_code: output.exit_code,
+                stderr: output.stderr,
+            });
+        }
+        Ok(match format {
+            // 常驻 HTTP 首次路径：会话由 API 直接新建，id 随响应带回（ADR-0007）。
+            OutputFormat::Json if output.new_session_id.is_some() => Reply {
+                text: output.stdout,
+                session_id: output.new_session_id,
+            },
+            // CLI 冷启动首次路径：id 只能从 json 事件流抓，文本照常重组（ADR-0007）。
+            OutputFormat::Json => {
+                let events = parse_json_events(&output.stdout);
+                Reply {
+                    text: events.text,
+                    session_id: events.session_id,
+                }
+            }
+            OutputFormat::Default => Reply {
+                text: output.stdout,
+                session_id: None,
+            },
+        })
+    }
+}
+
+/// 是否命中 opencode 对已失效会话的硬失败签名（ADR-0007）：CLI 冷启动是退出码 1 且 stderr
+/// 含 `SESSION_NOT_FOUND`；常驻 HTTP 路径是 404 且响应体含该串，两路各自只认自己的退出码。
+fn session_not_found(output: &InvokeOutput) -> bool {
+    (output.exit_code == 1 || output.exit_code == 404) && output.stderr.contains(SESSION_NOT_FOUND)
+}
+
+/// 从 `opencode run --format json` 事件流里解析出的内容：会话 id 与候选文本。
+/// 事件流每行一个 JSON 事件，见 ADR-0007。
+struct JsonEvents {
+    /// 任意事件顶层都带的 `sessionID`，取首个。
+    session_id: Option<String>,
+    /// `text` 事件的 `part.text` 按序拼接成的候选文本，交给 ADR-0002 解析。
+    text: String,
+}
+
+/// 解析 json 事件流：抓顶层 `sessionID`，把 `text` 事件（`part.text`）按序拼成文本。
+/// 拼接按 default 格式的口径补换行：每条 text 事件后跟一个换行（`opencode run` 的
+/// `part.text + EOL`），保证分隔符能独占一行。非 json 行与其它事件类型跳过。
+fn parse_json_events(output: &str) -> JsonEvents {
+    let mut session_id = None;
+    let mut parts = Vec::new();
+    for line in output.lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if session_id.is_none()
+            && let Some(id) = event.get("sessionID").and_then(serde_json::Value::as_str)
+        {
+            session_id = Some(id.to_string());
+        }
+        if event.get("type").and_then(serde_json::Value::as_str) == Some("text")
+            && let Some(text) = event
+                .get("part")
+                .and_then(|part| part.get("text"))
+                .and_then(serde_json::Value::as_str)
+        {
+            parts.push(text.to_string());
+        }
+    }
+    let mut text = String::new();
+    for part in &parts {
+        text.push_str(part);
+        if !part.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+    JsonEvents { session_id, text }
+}
 
 /// 调用 opencode 失败时带给人看的错误。
 #[derive(Debug)]
@@ -11,7 +120,7 @@ pub struct OpenCodeError {
 
 /// `opencode run` 的输出格式：default 是常规候选文本，json 是事件流（首次建会话用，见 ADR-0007）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputFormat {
+enum OutputFormat {
     Default,
     Json,
 }
@@ -19,17 +128,17 @@ pub enum OutputFormat {
 /// 一次请求的完整结果，统一 CLI 冷启动与常驻 HTTP 两种路径（ADR-0004 修订）。
 /// CLI 路径从子进程输出映射，HTTP 路径把 serve 返回重组进同形结构，调用方不再区分来源。
 #[derive(Debug)]
-pub struct InvokeOutput {
+struct InvokeOutput {
     /// 是否成功（CLI：退出码 0；HTTP：2xx）。
-    pub success: bool,
+    success: bool,
     /// 失败时的退出码：CLI 透传 opencode 退出码，HTTP 透传状态码。
-    pub exit_code: i32,
+    exit_code: i32,
     /// 候选文本：CLI 是 stdout，HTTP 是 serve 返回的助手 text part 拼接。
-    pub stdout: String,
+    stdout: String,
     /// 失败时的错误文本：CLI 是 stderr，HTTP 是响应体。
-    pub stderr: String,
+    stderr: String,
     /// 常驻 HTTP 首次路径新建的会话 id（需落盘）；CLI 路径恒为 None，会话 id 走 json 事件流。
-    pub new_session_id: Option<String>,
+    new_session_id: Option<String>,
 }
 
 /// 解析 opencode 可执行文件路径：ASK_OPENCODE_BIN 显式指定则优先并校验存在，否则回落 PATH。
@@ -48,16 +157,16 @@ pub fn resolve_bin() -> Result<PathBuf, OpenCodeError> {
 
 /// 按需挑路径发起一次请求：常驻开关打开且 serve 可用时走 HTTP API，否则回退 `opencode run`。
 /// 常驻 serve 拉起失败退化为冷启动，保留可诊断的错误提示（ADR-0004）。
-pub fn invoke(
+fn invoke(
     request: &str,
     agent: &str,
     model: Option<&str>,
-    config: &Config,
+    resident: bool,
     format: OutputFormat,
     session_id: Option<&str>,
 ) -> Result<InvokeOutput, OpenCodeError> {
     let bin = resolve_bin()?;
-    if config.resident {
+    if resident {
         match crate::resident::ensure_server_url(&bin) {
             Ok(url) => return invoke_http(request, agent, model, session_id, &url),
             Err(err) => {

@@ -1,14 +1,12 @@
+use crate::backend::{Backend, BackendError, Session};
 use crate::cli::GenerateArgs;
 use crate::config::Config;
 use crate::context::ContextSnapshot;
-use crate::opencode::{InvokeOutput, OutputFormat};
 use crate::validate::{ValidationResult, validate_candidate};
 use std::io::Write;
 
 /// ADR-0007：请求尾部这条声明是「把快照从会话记忆剥离」决策的落点。
 const SNAPSHOT_INVALIDATION: &str = "忽略本会话历史中的旧上下文快照，以本条为准";
-/// opencode 对已失效会话的硬失败签名（退出码 1 + 这条 stderr，实测见 ADR-0007）。
-const SESSION_NOT_FOUND: &str = "Session not found";
 
 /// reuse_session 开启时读落盘的会话 id；关闭复用或没落盘返回 None（ADR-0007）。
 fn reuse_session_id(config: &Config) -> Option<String> {
@@ -19,10 +17,18 @@ fn reuse_session_id(config: &Config) -> Option<String> {
     }
 }
 
+/// 有落盘 id 就续接；没有时按 reuse_session 决定新建常驻会话还是一次性会话（ADR-0007）。
+fn session_for<'a>(config: &Config, session_id: Option<&'a str>) -> Session<'a> {
+    match session_id {
+        Some(id) => Session::Resume(id),
+        None if config.reuse_session => Session::New,
+        None => Session::Oneshot,
+    }
+}
+
 pub fn run(args: GenerateArgs) -> i32 {
     let config = Config::load();
-    let agent = args.agent.as_deref().unwrap_or(&config.agent);
-    let model = args.model.as_deref().or(config.model.as_deref());
+    let backend = crate::backend::select(&config, args.agent.as_deref(), args.model.as_deref());
     let snapshot = ContextSnapshot::collect(&config);
     let request = format!(
         "{}\n\n请求：{}\n\n{}",
@@ -30,99 +36,51 @@ pub fn run(args: GenerateArgs) -> i32 {
         args.request,
         SNAPSHOT_INVALIDATION
     );
-    // 常驻会话（ADR-0007）：无落盘 id 时走 json 首次路径抓 id，否则 default 格式复用同一会话。
     let session_id = reuse_session_id(&config);
-    let format = if config.reuse_session && session_id.is_none() {
-        OutputFormat::Json
-    } else {
-        OutputFormat::Default
-    };
-    // 会话失效自动重建（ADR-0007）：仅对复用请求降级，其余成败一律交给 process_generate_output。
-    match crate::opencode::invoke(
-        &request,
-        agent,
-        model,
-        &config,
-        format,
-        session_id.as_deref(),
-    ) {
-        Ok(output) if session_id.is_some() && session_not_found(&output) => {
+    // 会话失效自动重建（ADR-0007）：清掉旧 id，新建会话重试一次。
+    let result = match backend.generate(&request, session_for(&config, session_id.as_deref())) {
+        Err(BackendError::SessionExpired) => {
             if let Err(err) = crate::resident::clear_session_id() {
                 // 清不掉旧 id 不中断重建，stderr 提示便于诊断。
                 eprintln!("resident: {}", err.message);
             }
-            match crate::opencode::invoke(&request, agent, model, &config, OutputFormat::Json, None)
-            {
-                Ok(retried) => {
-                    process_generate_output(&retried, OutputFormat::Json, agent, model, &config)
-                }
-                Err(err) => {
-                    eprintln!("generate: {}", err.message);
-                    1
-                }
-            }
+            backend.generate(&request, Session::New)
         }
-        Ok(output) => process_generate_output(&output, format, agent, model, &config),
-        Err(err) => {
-            eprintln!("generate: {}", err.message);
-            1
-        }
-    }
-}
-
-/// 处理一次 invoke 的结果：失败回显 stderr 并返回其退出码；成功则按 format 重组候选、
-/// 过静态校验与修正轮后 emit。候选文本与修正轮逻辑原先内联在 run 里，拆出来供
-/// 会话失效重建的重试路径复用。
-fn process_generate_output(
-    output: &InvokeOutput,
-    format: OutputFormat,
-    agent: &str,
-    model: Option<&str>,
-    config: &Config,
-) -> i32 {
-    if !output.success {
-        if !output.stderr.is_empty() {
-            std::io::stderr()
-                .write_all(output.stderr.as_bytes())
-                .expect("写 stderr 失败");
-        }
-        return output.exit_code;
-    }
-    let candidates = match format {
-        OutputFormat::Json => {
-            if let Some(new_session_id) = &output.new_session_id {
-                // 常驻 HTTP 首次路径：会话由 API 直接新建，id 从响应落盘（ADR-0007）。
-                if let Err(err) = crate::resident::save_session_id(new_session_id) {
-                    eprintln!("resident: {}", err.message);
-                }
-                crate::parse::split_candidates(&output.stdout)
-            } else {
-                // CLI 冷启动首次路径：id 只能从 json 事件流抓，文本照常重组（ADR-0007）。
-                let events = crate::parse::parse_json_events(&output.stdout);
-                if let Some(session_id) = &events.session_id
-                    && let Err(err) = crate::resident::save_session_id(session_id)
-                {
-                    eprintln!("resident: {}", err.message);
-                }
-                crate::parse::split_candidates(&events.text)
-            }
-        }
-        OutputFormat::Default => crate::parse::split_candidates(&output.stdout),
+        other => other,
     };
+    let reply = match result {
+        Ok(reply) => reply,
+        Err(BackendError::Failed { exit_code, stderr }) => {
+            if !stderr.is_empty() {
+                std::io::stderr()
+                    .write_all(stderr.as_bytes())
+                    .expect("写 stderr 失败");
+            }
+            return exit_code;
+        }
+        Err(BackendError::Unavailable { message }) => {
+            eprintln!("generate: {message}");
+            return 1;
+        }
+        // 只有续接会话才会失效，重试走的是新建会话，到不了这里。
+        Err(BackendError::SessionExpired) => {
+            eprintln!("generate: 会话失效");
+            return 1;
+        }
+    };
+    if let Some(new_session_id) = &reply.session_id
+        && let Err(err) = crate::resident::save_session_id(new_session_id)
+    {
+        eprintln!("resident: {}", err.message);
+    }
+    let candidates = crate::parse::split_candidates(&reply.text);
     let (passing, failing) = split_by_validation(&candidates);
     let final_candidates = if failing.is_empty() {
         passing
     } else {
-        correction_round(&failing, &passing, agent, model, config)
+        correction_round(&failing, &passing, backend.as_ref(), &config)
     };
     crate::parse::emit_candidates(&final_candidates, "generate")
-}
-
-/// 是否命中 opencode 对已失效会话的硬失败签名（ADR-0007）：CLI 冷启动是退出码 1 且 stderr
-/// 含 `SESSION_NOT_FOUND`；常驻 HTTP 路径是 404 且响应体含该串，两路各自只认自己的退出码。
-fn session_not_found(output: &InvokeOutput) -> bool {
-    (output.exit_code == 1 || output.exit_code == 404)
-        && output.stderr.contains(SESSION_NOT_FOUND)
 }
 
 /// 把候选按是否通过三项静态检查拆成两组。
@@ -140,33 +98,27 @@ fn split_by_validation(candidates: &[String]) -> (Vec<String>, Vec<ValidationRes
     (passing, failing)
 }
 
-/// 一轮修正回喂：未通过的候选重新交给 opencode，修正后通过校验的并入结果；
+/// 一轮修正回喂：未通过的候选重新交给后端，修正后通过校验的并入结果；
 /// 修正轮失败或修正后仍不过的候选静默丢弃，错误不回显。轮数由 ADR-0003 钉死为一轮。
 fn correction_round(
     failing: &[ValidationResult],
     passing: &[String],
-    agent: &str,
-    model: Option<&str>,
+    backend: &dyn Backend,
     config: &Config,
 ) -> Vec<String> {
     let mut result = passing.to_vec();
     let fix_request = build_fix_request(failing);
     // 修正轮复用主请求同一常驻会话（ADR-0007）：主请求刚走 json 首次路径时 id 已落盘，这里重读。
     let session_id = reuse_session_id(config);
-    let Ok(output) = crate::opencode::invoke(
-        &fix_request,
-        agent,
-        model,
-        config,
-        OutputFormat::Default,
-        session_id.as_deref(),
-    ) else {
+    // 修正轮不新建会话：没有落盘 id 就一次性跑（ADR-0007）。
+    let session = match &session_id {
+        Some(id) => Session::Resume(id),
+        None => Session::Oneshot,
+    };
+    let Ok(reply) = backend.generate(&fix_request, session) else {
         return result;
     };
-    if !output.success {
-        return result;
-    }
-    for candidate in crate::parse::split_candidates(&output.stdout) {
+    for candidate in crate::parse::split_candidates(&reply.text) {
         if validate_candidate(&candidate).passed {
             result.push(candidate);
         }
