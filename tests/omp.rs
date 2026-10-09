@@ -11,7 +11,7 @@ fn json_stdout(out: &std::process::Output) -> Value {
 /// 仓库 cmd-gen agent 文件去掉 frontmatter 后的正文（独立按文件格式切，不复用实现）。
 fn agent_body() -> String {
     let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".opencode/agents/cmd-gen.md"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agents/cmd-gen.md"),
     )
     .unwrap();
     let mut parts = text.splitn(3, "---\n");

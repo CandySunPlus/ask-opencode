@@ -2,7 +2,7 @@
 /// （独立按文件格式切，不复用 build.rs）。
 fn bash_rules() -> Vec<(String, String)> {
     let text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".opencode/agents/cmd-gen.md"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agents/cmd-gen.md"),
     )
     .unwrap();
     let rules: Vec<(String, String)> = text
