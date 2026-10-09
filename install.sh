@@ -199,11 +199,19 @@ if [ "$install_plugin" = 1 ]; then
 fi
 
 # cmd-gen agent 与插件同一 tag 契约：从 raw 拉取，失败即整体失败，不留半装（ADR-0008）。
-agent_url="$raw_base/$tag/.opencode/agents/cmd-gen.md"
-curl -fsSL -o "$tmp_dir/cmd-gen.md" "$agent_url" || {
+# 新路径 404 时退回老 tag 的旧路径 .opencode/agents/（ADR-0008）。
+agent_url="$raw_base/$tag/agents/cmd-gen.md"
+if ! http_code="$(curl -sSL -o "$tmp_dir/cmd-gen.md" -w '%{http_code}' "$agent_url")"; then
+  http_code="${http_code:-000}"
+fi
+if [ "$http_code" = "404" ]; then
+  agent_url="$raw_base/$tag/.opencode/agents/cmd-gen.md"
+  curl -fsSL -o "$tmp_dir/cmd-gen.md" "$agent_url" && http_code="200"
+fi
+if [ "$http_code" != "200" ]; then
   echo "install.sh: cmd-gen agent 下载失败: $agent_url" >&2
   exit 1
-}
+fi
 
 tar -xzf "$tmp_dir/$asset" -C "$tmp_dir"
 mkdir -p "$bin_dir"

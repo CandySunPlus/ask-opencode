@@ -16,8 +16,8 @@ const DARWIN_ARM64: &[(&str, &str)] = &[("FAKE_UNAME_S", "Darwin"), ("FAKE_UNAME
 /// `%{http_code}` 打状态码（真实 curl 配合 -o 的行为），`%{url_effective}` 打重定向目标
 /// （模拟 github.com releases/latest 的 HTML 重定向）。每次请求的 URL 追加到 `$CURL_LOG`，
 /// 供断言下载顺序与资产命名契约。`API_STATUS`/`REDIRECT_STATUS`/`ASSET_STATUS`/
-/// `PLUGIN_STATUS`/`AGENT_STATUS` 可覆盖对应请求的状态码，模拟 API 限流、平台无资产、
-/// 插件脚本下载失败等降级路径。
+/// `PLUGIN_STATUS`/`AGENT_STATUS`/`LEGACY_AGENT_STATUS` 可覆盖对应请求的状态码，模拟 API 限流、
+/// 平台无资产、插件脚本下载失败、agent 新路径 404 回退旧路径等降级路径。
 const CURL_STUB: &str = r#"
 out=""
 url=""
@@ -39,7 +39,9 @@ case "$url" in
   *github.com*releases/latest) redirect="$REDIRECT_TAG_URL"; status="${REDIRECT_STATUS:-200}" ;;
   *install.sh) payload="$FAKE_INSTALL_SCRIPT" ;;
   *ask-opencode.plugin.zsh) payload="$FIXTURE_PLUGIN"; status="${PLUGIN_STATUS:-200}" ;;
-  *cmd-gen.md) payload="$FIXTURE_AGENT"; status="${AGENT_STATUS:-200}" ;;
+  # 旧路径分支必须在新路径之前：*/agents/cmd-gen.md 也能匹配旧路径。
+  */.opencode/agents/cmd-gen.md) payload="$FIXTURE_AGENT"; status="${LEGACY_AGENT_STATUS:-200}" ;;
+  */agents/cmd-gen.md) payload="$FIXTURE_AGENT"; status="${AGENT_STATUS:-200}" ;;
   *.tar.gz) payload="$FIXTURE_ASSET"; status="${ASSET_STATUS:-200}" ;;
   *.sha256) payload="$FIXTURE_SHA" ;;
   *) echo "unexpected url: $url" >&2; exit 1 ;;
@@ -187,6 +189,7 @@ fn envs(s: &Sandbox, extra: &[(&str, &str)]) -> Vec<(String, String)> {
         ("ASSET_STATUS".into(), "200".into()),
         ("PLUGIN_STATUS".into(), "200".into()),
         ("AGENT_STATUS".into(), "200".into()),
+        ("LEGACY_AGENT_STATUS".into(), "200".into()),
     ];
     for (k, v) in extra {
         envs.push(((*k).into(), (*v).to_string()));
@@ -274,7 +277,7 @@ fn installs_latest_with_download_verify_install_cleanup() {
     );
     assert!(log[2].ends_with(".sha256"), "{log:?}");
     assert!(
-        log[3].contains(&format!("/{TAG}/.opencode/agents/cmd-gen.md")),
+        log[3].contains(&format!("/{TAG}/agents/cmd-gen.md")),
         "agent 应按同一 tag 从 raw 拉取: {log:?}"
     );
 }
@@ -436,7 +439,7 @@ fn zsh_custom_present_installs_plugin_and_prints_omz_hint() {
         "插件应按同一 tag 从 raw 拉取: {log:?}"
     );
     assert!(
-        log[4].contains(&format!("/{TAG}/.opencode/agents/cmd-gen.md")),
+        log[4].contains(&format!("/{TAG}/agents/cmd-gen.md")),
         "agent 应按同一 tag 从 raw 拉取: {log:?}"
     );
     assert!(
@@ -611,7 +614,7 @@ fn v_flag_pins_version_and_skips_latest_api() {
     );
     assert!(log[1].ends_with(".sha256"), "{log:?}");
     assert!(
-        log[2].contains("/v9.9.9/.opencode/agents/cmd-gen.md"),
+        log[2].contains("/v9.9.9/agents/cmd-gen.md"),
         "agent 应按同一指定 tag 拉取: {log:?}"
     );
     assert_tmp_empty(&s);
@@ -636,7 +639,7 @@ fn ask_opencode_version_env_pins_version() {
         log[0].ends_with("ask-opencode-darwin-aarch64-v9.9.9.tar.gz"),
         "资产 URL 应带指定版本: {log:?}"
     );
-    assert!(log[2].contains("/v9.9.9/.opencode/agents/cmd-gen.md"), "{log:?}");
+    assert!(log[2].contains("/v9.9.9/agents/cmd-gen.md"), "{log:?}");
     assert_tmp_empty(&s);
 }
 
@@ -659,7 +662,7 @@ fn v_flag_overrides_ask_opencode_version_env() {
         log[0].ends_with("ask-opencode-darwin-aarch64-v9.9.9.tar.gz"),
         "-V 应优先于环境变量: {log:?}"
     );
-    assert!(log[2].contains("/v9.9.9/.opencode/agents/cmd-gen.md"), "{log:?}");
+    assert!(log[2].contains("/v9.9.9/agents/cmd-gen.md"), "{log:?}");
     assert_tmp_empty(&s);
 }
 
@@ -690,7 +693,7 @@ fn v_flag_pins_plugin_tag_too() {
         "插件应按同一指定 tag 拉取: {log:?}"
     );
     assert!(
-        log[3].contains("/v9.9.9/.opencode/agents/cmd-gen.md"),
+        log[3].contains("/v9.9.9/agents/cmd-gen.md"),
         "agent 应按同一指定 tag 拉取: {log:?}"
     );
     assert_tmp_empty(&s);
@@ -901,18 +904,25 @@ fn plugin_download_failure_leaves_no_binary() {
     assert_tmp_empty(&s);
 }
 
-/// cmd-gen agent 下载失败：整体失败、二进制不落盘、agent 目录不创建。
+/// cmd-gen agent 新旧路径都 404：整体失败、报错带旧路径 URL、二进制不落盘、agent 目录不创建。
 #[test]
-fn agent_download_failure_leaves_no_binary() {
+fn agent_both_paths_404_leaves_no_binary() {
     let s = setup_sandbox();
     install_fakes(&s);
     make_fixtures(&s);
 
-    let mut extra: Vec<(&str, &str)> = vec![("AGENT_STATUS", "404")];
+    let mut extra: Vec<(&str, &str)> =
+        vec![("AGENT_STATUS", "404"), ("LEGACY_AGENT_STATUS", "404")];
     extra.extend_from_slice(DARWIN_ARM64);
-    let out = run_install(&s, &[], &extra);
+    let out = run_install(&s, &["-V", "v9.9.9"], &extra);
     assert!(!out.status.success(), "agent 下载失败应非零退出");
-    assert!(stderr_str(&out).contains("cmd-gen agent 下载失败"), "stderr: {}", stderr_str(&out));
+    let err = stderr_str(&out);
+    assert!(
+        err.contains("cmd-gen agent 下载失败") && err.contains("/v9.9.9/.opencode/agents/cmd-gen.md"),
+        "报错应带失败的回退 URL: {err}"
+    );
+    let log = curl_log(&s);
+    assert_eq!(log.len(), 4, "资产/校验/agent 新路径/agent 旧路径: {log:?}");
     assert!(
         !s.home.join(".local/bin/ask-opencode").exists(),
         "agent 失败不应残留二进制"
@@ -920,6 +930,65 @@ fn agent_download_failure_leaves_no_binary() {
     assert!(
         !s.home.join(".config/opencode/agents").exists(),
         "agent 失败不应创建 agents 目录"
+    );
+    assert_tmp_empty(&s);
+}
+
+/// agent 新路径非 404 失败（如 5xx）：不回退旧路径，整体失败、报错带新路径 URL、不留半装。
+#[test]
+fn agent_non_404_failure_does_not_fall_back() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+
+    let mut extra: Vec<(&str, &str)> = vec![("AGENT_STATUS", "500")];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &["-V", "v9.9.9"], &extra);
+    assert!(!out.status.success(), "agent 下载失败应非零退出");
+    let err = stderr_str(&out);
+    assert!(
+        err.contains("cmd-gen agent 下载失败") && err.contains("/v9.9.9/agents/cmd-gen.md"),
+        "报错应带失败的新路径 URL: {err}"
+    );
+    let log = curl_log(&s);
+    assert_eq!(log.len(), 3, "非 404 不应请求旧路径: {log:?}");
+    assert!(log[2].contains("/v9.9.9/agents/cmd-gen.md"), "{log:?}");
+    assert!(
+        !s.home.join(".local/bin/ask-opencode").exists(),
+        "agent 失败不应残留二进制"
+    );
+    assert!(
+        !s.home.join(".config/opencode/agents").exists(),
+        "agent 失败不应创建 agents 目录"
+    );
+    assert_tmp_empty(&s);
+}
+
+/// agent 新路径 404（老 tag 还没挪文件）：退回旧路径 `.opencode/agents/` 再拉一次，照常安装（ADR-0008）。
+#[test]
+fn agent_new_path_404_falls_back_to_legacy_path() {
+    let s = setup_sandbox();
+    install_fakes(&s);
+    make_fixtures(&s);
+
+    let mut extra: Vec<(&str, &str)> = vec![("AGENT_STATUS", "404")];
+    extra.extend_from_slice(DARWIN_ARM64);
+    let out = run_install(&s, &["-V", "v9.9.9"], &extra);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_installed_bin(&s.home.join(".local/bin/ask-opencode"));
+    let agent = s.home.join(".config/opencode/agents/cmd-gen.md");
+    assert_eq!(
+        fs::read_to_string(&agent).unwrap(),
+        fs::read_to_string(&s.fixture_agent).unwrap(),
+        "回退拉到的 agent 应照常装入"
+    );
+    let log = curl_log(&s);
+    assert_eq!(log.len(), 4, "资产/校验/agent 新路径/agent 旧路径: {log:?}");
+    assert!(log[2].contains("/v9.9.9/agents/cmd-gen.md"), "{log:?}");
+    assert!(
+        log[3].contains("/v9.9.9/.opencode/agents/cmd-gen.md"),
+        "新路径 404 后应按同一 tag 回退旧路径: {log:?}"
     );
     assert_tmp_empty(&s);
 }

@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-const AGENT_FILE: &str = ".opencode/agents/cmd-gen.md";
+const AGENT_FILE: &str = "agents/cmd-gen.md";
 
 fn main() {
     println!("cargo:rerun-if-changed={AGENT_FILE}");
