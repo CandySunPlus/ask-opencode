@@ -1103,6 +1103,31 @@ fn reset_session_only_clears_current_backend_partition() {
     );
 }
 
+/// 当前后端是 omp 时 `reset-session` 不碰 opencode 分区：opencode 的常驻会话切回来还能续上
+/// （ADR-0009）。
+#[test]
+fn reset_session_under_omp_keeps_opencode_session() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.json"), r#"{"backend":"omp"}"#).unwrap();
+    let opencode =
+        serde_json::json!({"url": "http://127.0.0.1:1", "pid": 123, "session_id": "sess-keep"});
+    std::fs::write(
+        dir.path().join("server.json"),
+        serde_json::json!({"opencode": opencode}).to_string(),
+    )
+    .unwrap();
+    let envs = reset_envs(dir.path());
+
+    let out = run_in_dir_owned(dir.path(), &["reset-session"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_eq!(
+        read_state(dir.path()),
+        serde_json::json!({"opencode": opencode}),
+        "omp 下不应清 opencode 分区的会话"
+    );
+}
+
 /// 旧格式状态文件上 `reset-session`：清掉会话、url/pid 搬进 opencode 分区（ADR-0009）。
 #[test]
 fn reset_session_migrates_legacy_state_file() {

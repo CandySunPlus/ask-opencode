@@ -11,6 +11,10 @@ pub struct Omp {
 }
 
 impl Backend for Omp {
+    fn name(&self) -> &'static str {
+        "omp"
+    }
+
     fn generate(&self, request: &str, _session: Session<'_>) -> Result<Reply, BackendError> {
         let bin = crate::backend::resolve_bin("ASK_OPENCODE_OMP_BIN", "omp")
             .map_err(|message| BackendError::Unavailable { message })?;
