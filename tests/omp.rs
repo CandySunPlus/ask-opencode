@@ -93,6 +93,93 @@ fn generate_passes_json_mode_no_session_system_prompt_and_narrowing_flags_to_omp
 }
 
 #[test]
+fn generate_runs_omp_in_always_ask_mode_with_bash_as_the_only_builtin_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let omp = write_fake_omp(dir.path(), &[OMP_OK]);
+    let out = run_omp(&omp, &["generate", "list files"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let args = omp.args(1);
+    assert_eq!(
+        value_after(&args, "--approval-mode").as_deref(),
+        Some("always-ask")
+    );
+    assert_eq!(value_after(&args, "--tools").as_deref(), Some("bash"));
+    assert!(!args.iter().any(|arg| arg == "--auto-approve"), "{args:?}");
+}
+
+/// opencode cmd-gen agent 的 bash 白名单，按 agent 文件里的顺序（#56 票面所列）。
+const AGENT_BASH_WHITELIST: [&str; 14] = [
+    "git status*",
+    "git diff*",
+    "git log*",
+    "git show*",
+    "git rev-parse*",
+    "git branch*",
+    "ls *",
+    "ls",
+    "cat *",
+    "find *",
+    "grep *",
+    "pwd",
+    "docker images*",
+    "docker ps*",
+];
+
+#[test]
+fn generate_passes_omp_a_bash_whitelist_mirroring_cmd_gen_agent_with_catch_all_deny() {
+    let dir = tempfile::tempdir().unwrap();
+    let omp = write_fake_omp(dir.path(), &[OMP_OK]);
+    let out = run_omp(&omp, &["generate", "list files"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let overlay = omp.config(1);
+    let mut expected: Vec<serde_json::Value> = AGENT_BASH_WHITELIST
+        .iter()
+        .map(|pattern| serde_json::json!({"match": pattern, "approval": "allow"}))
+        .collect();
+    expected.push(serde_json::json!({"match": "*", "approval": "deny"}));
+    assert_eq!(
+        overlay["bash"]["patterns"],
+        serde_json::Value::Array(expected)
+    );
+    assert_eq!(overlay["bash"]["allowCompoundCommands"], false);
+}
+
+#[test]
+fn generate_keeps_user_level_context_files_out_of_omp_and_reuses_overlay_in_correction_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let omp = write_fake_omp(
+        dir.path(),
+        &[
+            "echo hello\n---CANDIDATE---\nfoobar_nonexistent_xyz",
+            "echo fixed",
+        ],
+    );
+    let out = run_omp(&omp, &["generate", "list files"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    assert_eq!(omp.calls(), 2);
+    let overlay = omp.config(1);
+    let disabled = overlay["disabledExtensions"]
+        .as_array()
+        .expect("缺 disabledExtensions");
+    for name in [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "GEMINI.md",
+        "copilot-instructions.md",
+    ] {
+        let id = serde_json::json!(format!("context-file:user:{name}"));
+        assert!(disabled.contains(&id), "缺 {id}: {disabled:?}");
+    }
+    assert!(
+        !disabled
+            .iter()
+            .any(|id| id.as_str().unwrap().starts_with("context-file:project:")),
+        "项目级上下文应保留: {disabled:?}"
+    );
+    assert_eq!(omp.config(2), overlay);
+}
+
+#[test]
 fn generate_uses_omp_when_config_file_backend_is_omp() {
     let dir = tempfile::tempdir().unwrap();
     let omp = write_fake_omp(dir.path(), &[OMP_OK]);

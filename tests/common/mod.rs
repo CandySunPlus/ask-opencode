@@ -205,8 +205,9 @@ pub fn sha256_of(path: &Path) -> String {
         .to_string()
 }
 
-/// fake omp shim（ADR-0009）：每次调用把 argv 记到 `omp-args.<序号>`（`@@@` 分隔），stdout 吐
-/// 第 N 个回复拼成的 `omp --mode json` NDJSON；调用次数多于回复数时重复最后一个。
+/// fake omp shim（ADR-0009）：每次调用把 argv 记到 `omp-args.<序号>`（`@@@` 分隔），`--config`
+/// 指向的叠加文件当场拷到 `omp-config.<序号>`，stdout 吐第 N 个回复拼成的 `omp --mode json`
+/// NDJSON；调用次数多于回复数时重复最后一个。
 pub struct FakeOmp {
     pub bin: PathBuf,
     dir: PathBuf,
@@ -227,6 +228,13 @@ impl FakeOmp {
             .filter(|chunk| !chunk.is_empty())
             .map(str::to_string)
             .collect()
+    }
+
+    /// 第 `n` 次（从 1 起）调用时 `--config` 叠加文件的内容，按 JSON 解析。
+    pub fn config(&self, n: usize) -> serde_json::Value {
+        let text = std::fs::read_to_string(self.dir.join(format!("omp-config.{n}")))
+            .expect("该次调用没有带 --config");
+        serde_json::from_str(&text).unwrap()
     }
 }
 
@@ -249,6 +257,7 @@ pub fn write_fake_omp(dir: &Path, responses: &[&str]) -> FakeOmp {
     let script = format!(
         "n=$(cat \"{d}/omp.count\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"{d}/omp.count\"\n\
          for a in \"$@\"; do printf '%s\\n@@@\\n' \"$a\"; done > \"{d}/omp-args.$n\"\n\
+         prev=; for a in \"$@\"; do [ \"$prev\" = --config ] && cp \"$a\" \"{d}/omp-config.$n\"; prev=$a; done\n\
          f=\"{d}/omp-resp.$n\"; [ -f \"$f\" ] || f=\"{d}/omp-resp.last\"; cat \"$f\""
     );
     FakeOmp {
