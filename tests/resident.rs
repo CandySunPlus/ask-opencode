@@ -103,7 +103,7 @@ fn run_generate(dir: &Path, shim: &Path, serve: &Path, port: u16) -> std::proces
 fn read_serve_pid(dir: &Path) -> Option<u32> {
     let text = std::fs::read_to_string(dir.join("server.json")).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
-    value["pid"].as_u64().map(|pid| pid as u32)
+    value["opencode"]["pid"].as_u64().map(|pid| pid as u32)
 }
 
 fn kill_serve(dir: &Path) {

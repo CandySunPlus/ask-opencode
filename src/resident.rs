@@ -1,7 +1,7 @@
-use crate::config;
-use crate::opencode::OpenCodeError;
+use crate::opencode::{OPENCODE, OpenCodeError};
+use crate::state;
 use std::net::{SocketAddr, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -14,57 +14,38 @@ const HEALTH_TIMEOUT: Duration = Duration::from_millis(300);
 /// 轮询启动日志的间隔。
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// 常驻服务状态：URL/PID 与 session_id 按需缺省（字段语义见 ADR-0004/0007）。
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct ServerState {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pid: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
-}
-
-/// 解析状态文件路径并确保父目录存在，供 serve 与会话状态共用。
-fn prepare_state_path() -> Result<PathBuf, OpenCodeError> {
-    let state_path = config::state_path().ok_or_else(|| OpenCodeError {
-        message: "无法确定常驻服务状态文件路径".to_string(),
-    })?;
-    if let Some(parent) = state_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| OpenCodeError {
-            message: format!("无法创建配置目录 {}: {err}", parent.display()),
-        })?;
-    }
-    Ok(state_path)
+/// 刚拉起的 serve 的地址与进程号，落进 opencode 分区（字段语义见 ADR-0004）。
+struct Started {
+    url: String,
+    pid: u32,
 }
 
 /// 确保常驻 serve 在跑并返回其 URL，供常驻 HTTP API 复用（ADR-0004）。
 pub fn ensure_server_url(bin: &Path) -> Result<String, OpenCodeError> {
-    let state_path = prepare_state_path()?;
-    if let Some(state) = load_state(&state_path)
-        && let Some(url) = state.url.as_deref()
+    let state = state::load_partition(OPENCODE);
+    if let Some(url) = state.get("url").and_then(|url| url.as_str())
         && is_alive(url)
     {
         return Ok(url.to_string());
     }
-    let started = start_server(bin, &state_path)?;
-    // 合并进既有状态：拉起 serve 不得抹掉已落盘的 session_id（ADR-0007）。
-    let mut state = load_state(&state_path).unwrap_or_default();
-    state.url = started.url;
-    state.pid = started.pid;
-    save_state(&state_path, &state)?;
-    Ok(state.url.unwrap())
+    let log_path = state::prepare_state_path()?.with_file_name("serve.log");
+    let started = start_server(bin, &log_path)?;
+    // 只改 url/pid：拉起 serve 不得抹掉已落盘的 session_id（ADR-0007）。
+    state::update_partition(OPENCODE, |partition| {
+        partition.insert("url".to_string(), started.url.clone().into());
+        partition.insert("pid".to_string(), started.pid.into());
+    })?;
+    Ok(started.url)
 }
 
 /// 拉起 `opencode serve`：stdout/stderr 落到 serve.log（每次 truncate，避免读到旧监听行），
 /// 轮询日志等监听行、再等端口就绪，拿到 URL 即返回（进程保留为常驻孤儿进程）。
-fn start_server(bin: &Path, state_path: &Path) -> Result<ServerState, OpenCodeError> {
-    let log_path = state_path.with_file_name("serve.log");
+fn start_server(bin: &Path, log_path: &Path) -> Result<Started, OpenCodeError> {
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open(&log_path)
+        .open(log_path)
         .map_err(|err| OpenCodeError {
             message: format!("无法打开 serve 日志 {}: {err}", log_path.display()),
         })?;
@@ -85,18 +66,17 @@ fn start_server(bin: &Path, state_path: &Path) -> Result<ServerState, OpenCodeEr
     let mut found_url = None;
     loop {
         if let Ok(Some(_)) = child.try_wait() {
-            let tail = read_log_tail(&log_path);
+            let tail = read_log_tail(log_path);
             let _ = child.kill();
             return Err(OpenCodeError {
                 message: format!("{} serve 启动失败：{tail}", bin.display()),
             });
         }
-        if let Some(url) = found_url.clone().or_else(|| read_listening_url(&log_path)) {
+        if let Some(url) = found_url.clone().or_else(|| read_listening_url(log_path)) {
             if is_alive(&url) {
-                return Ok(ServerState {
-                    url: Some(url),
-                    pid: Some(child.id()),
-                    session_id: None,
+                return Ok(Started {
+                    url,
+                    pid: child.id(),
                 });
             }
             found_url = Some(url);
@@ -149,49 +129,4 @@ fn read_log_tail(log_path: &Path) -> String {
         .rev()
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn load_state(path: &Path) -> Option<ServerState> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-fn save_state(path: &Path, state: &ServerState) -> Result<(), OpenCodeError> {
-    let text = serde_json::to_string(state).map_err(|err| OpenCodeError {
-        message: format!("无法序列化常驻 serve 状态: {err}"),
-    })?;
-    std::fs::write(path, text).map_err(|err| OpenCodeError {
-        message: format!("无法写入常驻 serve 状态 {}: {err}", path.display()),
-    })
-}
-
-/// 读状态文件里的常驻会话 id；文件缺失或没有落盘返回 None（ADR-0007）。
-pub fn load_session_id() -> Option<String> {
-    let state_path = config::state_path()?;
-    let state = load_state(&state_path)?;
-    state.session_id
-}
-
-/// 把首次请求抓到的会话 id 落盘；保留 serve 的 `{url, pid}`（读改写，ADR-0007）。
-pub fn save_session_id(session_id: &str) -> Result<(), OpenCodeError> {
-    let state_path = prepare_state_path()?;
-    let mut state = load_state(&state_path).unwrap_or_default();
-    state.session_id = Some(session_id.to_string());
-    save_state(&state_path, &state)
-}
-
-/// 清空状态文件里的会话 id、保留 serve 的 `{url, pid}`；文件缺失或无 id 时同样成功（幂等，
-/// `reset-session` 子命令，ADR-0007）。只读改写状态文件，不重拉、不杀常驻服务。
-pub fn clear_session_id() -> Result<(), OpenCodeError> {
-    let state_path = config::state_path().ok_or_else(|| OpenCodeError {
-        message: "无法确定常驻服务状态文件路径".to_string(),
-    })?;
-    if !state_path.exists() {
-        return Ok(());
-    }
-    let Some(mut state) = load_state(&state_path) else {
-        return Ok(());
-    };
-    state.session_id = None;
-    save_state(&state_path, &state)
 }
