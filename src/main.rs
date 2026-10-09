@@ -12,6 +12,7 @@ mod picker;
 mod reset_session;
 mod resident;
 mod select;
+mod state;
 mod validate;
 
 use clap::Parser;

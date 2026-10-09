@@ -6,6 +6,9 @@ use std::time::Duration;
 /// opencode 对已失效会话的硬失败签名（退出码 1 + 这条 stderr，实测见 ADR-0007）。
 const SESSION_NOT_FOUND: &str = "Session not found";
 
+/// opencode 在状态文件里的分区名（ADR-0009）。
+pub const OPENCODE: &str = "opencode";
+
 /// 后端的 opencode 实现（ADR-0009），路径选择见 `invoke`。
 pub struct OpenCode {
     pub agent: String,
@@ -14,6 +17,10 @@ pub struct OpenCode {
 }
 
 impl Backend for OpenCode {
+    fn name(&self) -> &'static str {
+        OPENCODE
+    }
+
     fn generate(&self, request: &str, session: Session<'_>) -> Result<Reply, BackendError> {
         // 常驻会话（ADR-0007）：新建会话走 json 首次路径抓 id，其余用 default 格式。
         let (format, session_id) = match session {

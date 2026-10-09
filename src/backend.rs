@@ -35,6 +35,9 @@ pub enum BackendError {
 /// 后端（见 `CONTEXT.md`「后端」、ADR-0009）：冷启动还是常驻、会话 id 从哪抓、
 /// 何为会话失效，都由实现自己决定。
 pub trait Backend {
+    /// 后端名，也是它在状态文件里的分区名（ADR-0009）。
+    fn name(&self) -> &'static str;
+
     fn generate(&self, request: &str, session: Session<'_>) -> Result<Reply, BackendError>;
 }
 

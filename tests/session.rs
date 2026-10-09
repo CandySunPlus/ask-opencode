@@ -33,8 +33,13 @@ fn read_state(dir: &Path) -> Value {
     serde_json::from_str(&text).unwrap()
 }
 
+/// 状态文件里的 opencode 分区（ADR-0009）。
+fn read_opencode(dir: &Path) -> Value {
+    read_state(dir)["opencode"].clone()
+}
+
 fn read_serve_pid(dir: &Path) -> Option<u32> {
-    read_state(dir)["pid"].as_u64().map(|pid| pid as u32)
+    read_opencode(dir)["pid"].as_u64().map(|pid| pid as u32)
 }
 
 fn kill_serve(dir: &Path) {
@@ -150,15 +155,101 @@ fn first_request_uses_json_and_persists_session_id() {
         "首次请求不应带 --session: {args}"
     );
 
-    let state = read_state(dir.path());
+    let root = read_state(dir.path());
+    assert_eq!(
+        root.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["opencode"],
+        "状态文件顶层应只有 opencode 分区: {root}"
+    );
+    let state = &root["opencode"];
     assert_eq!(
         state["session_id"], "sess-abc123",
-        "状态文件应落盘 session_id: {state}"
+        "opencode 分区应落盘 session_id: {root}"
     );
     assert!(
         state.get("url").is_none() && state.get("pid").is_none(),
-        "冷启动不应写 url/pid: {state}"
+        "冷启动不应写 url/pid: {root}"
     );
+}
+
+/// 旧格式状态文件（顶层 `{url, pid, session_id}`，ADR-0009 之前）读作 opencode 分区：
+/// 升级后续上其中的会话，下次写入转成按后端分区的新格式、url/pid 一并搬进分区。
+#[test]
+fn legacy_state_file_resumes_session_and_migrates_on_write() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("server.json"),
+        r#"{"url":"http://127.0.0.1:1","pid":123,"session_id":"sess-legacy"}"#,
+    )
+    .unwrap();
+    // 续接旧会话时报失效，逼出一次写入（清旧 id、落盘新 id）。
+    let shim = write_fake_opencode(
+        dir.path(),
+        r#"
+for a in "$@"; do printf '%s\n@@@\n' "$a"; done >> "$FAKE_ARGS_LOG"
+if printf '%s' "$*" | grep -q -- '--format json'; then
+  printf '%s\n' '{"type":"text","sessionID":"sess-new","timestamp":1,"part":{"id":"p1","type":"text","text":"echo hello\n"}}'
+else
+  echo 'Session not found' >&2
+  exit 1
+fi
+"#,
+    );
+    let envs = session_envs(dir.path(), &shim, &[("ASK_OPENCODE_RESIDENT", "false")]);
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    let args = std::fs::read_to_string(dir.path().join("args.log")).unwrap();
+    assert!(
+        has_pair(&args, "--session", "sess-legacy"),
+        "应续接旧格式里的会话 id: {args}"
+    );
+    assert_eq!(
+        read_state(dir.path()),
+        serde_json::json!({
+            "opencode": {"url": "http://127.0.0.1:1", "pid": 123, "session_id": "sess-new"}
+        }),
+        "写入后应转成新格式"
+    );
+}
+
+/// 旧格式里的常驻服务地址照旧复用：serve 还在跑就不再拉起。
+#[test]
+fn legacy_state_file_reuses_running_serve() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = write_fake_opencode(dir.path(), SHIM_SESSION);
+    let serve = write_fake_serve(dir.path());
+    let port = free_port();
+    let envs = serve_envs(
+        dir.path(),
+        &shim,
+        &serve,
+        port,
+        &[("ASK_OPENCODE_RESIDENT", "true")],
+    );
+    // 先正常拉起 serve，再把状态文件改写成旧格式。
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+    let partition = read_opencode(dir.path());
+    std::fs::write(dir.path().join("server.json"), partition.to_string()).unwrap();
+
+    let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    let serves = std::fs::read_to_string(dir.path().join("serve-count")).unwrap();
+    assert_eq!(
+        serves.lines().count(),
+        1,
+        "旧格式里的 serve 应被复用: {serves}"
+    );
+    let sessions = std::fs::read_to_string(dir.path().join("session.log")).unwrap();
+    assert_eq!(
+        sessions.lines().count(),
+        1,
+        "旧格式里的会话应被续接: {sessions}"
+    );
+    kill_serve(dir.path());
 }
 
 /// 候选分隔符跨多条 `text` 事件时按序拼接仍能正确解析（ADR-0002 契约不变）。
@@ -415,7 +506,7 @@ fn first_request_in_serve_mode_keeps_url_and_pid() {
         "首次请求应经 POST /session 建会话: {sessions}"
     );
 
-    let state = read_state(dir.path());
+    let state = read_opencode(dir.path());
     let url = format!("http://127.0.0.1:{port}");
     assert_eq!(state["url"], url, "状态应保留 url: {state}");
     assert!(state["pid"].as_u64().is_some(), "状态应保留 pid: {state}");
@@ -472,7 +563,7 @@ fn second_request_in_serve_mode_reuses_session() {
     let msgs = std::fs::read_to_string(dir.path().join("msg.log")).unwrap();
     assert_eq!(msgs.lines().count(), 2, "两次请求都应发消息: {msgs}");
 
-    let state = read_state(dir.path());
+    let state = read_opencode(dir.path());
     assert_eq!(state["session_id"], "sess-http-1");
     kill_serve(dir.path());
 }
@@ -517,7 +608,7 @@ fn correction_round_in_serve_mode_reuses_session() {
     assert_eq!(msgs.lines().count(), 2, "主请求与修正轮各发一次消息: {msgs}");
     assert_no_cli_runs(dir.path());
 
-    let state = read_state(dir.path());
+    let state = read_opencode(dir.path());
     assert_eq!(state["session_id"], "sess-http-1");
     kill_serve(dir.path());
 }
@@ -533,7 +624,7 @@ fn starting_serve_preserves_persisted_session_id() {
     let cold = session_envs(dir.path(), &shim, &[("ASK_OPENCODE_RESIDENT", "false")]);
     let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &cold);
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
-    assert_eq!(read_state(dir.path())["session_id"], "sess-abc123");
+    assert_eq!(read_opencode(dir.path())["session_id"], "sess-abc123");
 
     let serve_envs = serve_envs(
         dir.path(),
@@ -545,7 +636,7 @@ fn starting_serve_preserves_persisted_session_id() {
     let out = run_in_dir_owned(dir.path(), &["generate", "list files"], &serve_envs);
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
 
-    let state = read_state(dir.path());
+    let state = read_opencode(dir.path());
     assert_eq!(
         state["session_id"], "sess-abc123",
         "serve 拉起不应抹掉已落盘的会话: {state}"
@@ -697,7 +788,7 @@ fi
         serde_json::json!(["echo hello", "ls -la"])
     );
 
-    let state = read_state(dir.path());
+    let state = read_opencode(dir.path());
     assert_eq!(
         state["session_id"], "sess-new",
         "重建应落盘新会话 id: {state}"
@@ -751,10 +842,10 @@ exit 1
         "其它失败不应走 json 重建：{args}"
     );
 
-    let state = read_state(dir.path());
     assert_eq!(
-        state["session_id"], "sess-stale",
-        "失败不应改动状态文件: {state}"
+        read_state(dir.path()),
+        serde_json::json!({"session_id": "sess-stale"}),
+        "失败不应改动状态文件"
     );
 }
 
@@ -789,10 +880,10 @@ exit 3
         "退出码不符不应走 json 重建：{args}"
     );
 
-    let state = read_state(dir.path());
     assert_eq!(
-        state["session_id"], "sess-stale",
-        "不应改动状态文件: {state}"
+        read_state(dir.path()),
+        serde_json::json!({"session_id": "sess-stale"}),
+        "不应改动状态文件"
     );
 }
 
@@ -930,7 +1021,7 @@ printf 'echo hello\n---CANDIDATE---\nls -la\n'
         serde_json::json!(["echo hello", "ls -la"])
     );
 
-    let state = read_state(dir.path());
+    let state = read_opencode(dir.path());
     assert_eq!(
         state["session_id"], "sess-http-1",
         "重建应落盘新会话 id: {state}"
@@ -973,12 +1064,88 @@ fn reset_session_clears_session_id_and_keeps_url_pid() {
     let out = run_in_dir_owned(dir.path(), &["reset-session"], &envs);
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
 
-    let state = read_state(dir.path());
+    let state = read_opencode(dir.path());
     assert_eq!(state["url"], "http://127.0.0.1:1", "url 应保留: {state}");
     assert_eq!(state["pid"], 123, "pid 应保留: {state}");
     assert!(
         state.get("session_id").is_none(),
         "session_id 应被清空: {state}"
+    );
+}
+
+/// 按后端清理（ADR-0009）：只清当前后端（默认 opencode）分区里的会话，分区里的常驻服务信息
+/// 与其他后端的分区原样保留。
+#[test]
+fn reset_session_only_clears_current_backend_partition() {
+    let dir = tempfile::tempdir().unwrap();
+    let omp = serde_json::json!({"sessions": {"/tmp/a": "omp-sess-1"}});
+    std::fs::write(
+        dir.path().join("server.json"),
+        serde_json::json!({
+            "opencode": {"url": "http://127.0.0.1:1", "pid": 123, "session_id": "sess-stale"},
+            "omp": omp,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let envs = reset_envs(dir.path());
+
+    let out = run_in_dir_owned(dir.path(), &["reset-session"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_eq!(
+        read_state(dir.path()),
+        serde_json::json!({
+            "opencode": {"url": "http://127.0.0.1:1", "pid": 123},
+            "omp": omp,
+        }),
+        "只应清掉 opencode 分区的 session_id"
+    );
+}
+
+/// 当前后端是 omp 时 `reset-session` 不碰 opencode 分区：opencode 的常驻会话切回来还能续上
+/// （ADR-0009）。
+#[test]
+fn reset_session_under_omp_keeps_opencode_session() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.json"), r#"{"backend":"omp"}"#).unwrap();
+    let opencode =
+        serde_json::json!({"url": "http://127.0.0.1:1", "pid": 123, "session_id": "sess-keep"});
+    std::fs::write(
+        dir.path().join("server.json"),
+        serde_json::json!({"opencode": opencode}).to_string(),
+    )
+    .unwrap();
+    let envs = reset_envs(dir.path());
+
+    let out = run_in_dir_owned(dir.path(), &["reset-session"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_eq!(
+        read_state(dir.path()),
+        serde_json::json!({"opencode": opencode}),
+        "omp 下不应清 opencode 分区的会话"
+    );
+}
+
+/// 旧格式状态文件上 `reset-session`：清掉会话、url/pid 搬进 opencode 分区（ADR-0009）。
+#[test]
+fn reset_session_migrates_legacy_state_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("server.json"),
+        r#"{"url":"http://127.0.0.1:1","pid":123,"session_id":"sess-stale"}"#,
+    )
+    .unwrap();
+    let envs = reset_envs(dir.path());
+
+    let out = run_in_dir_owned(dir.path(), &["reset-session"], &envs);
+    assert!(out.status.success(), "stderr: {}", stderr_str(&out));
+
+    assert_eq!(
+        read_state(dir.path()),
+        serde_json::json!({"opencode": {"url": "http://127.0.0.1:1", "pid": 123}}),
+        "应清掉会话并转成新格式"
     );
 }
 
@@ -996,7 +1163,7 @@ fn reset_session_is_idempotent_when_no_session_id() {
     let out = run_in_dir_owned(dir.path(), &["reset-session"], &envs);
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
 
-    let state = read_state(dir.path());
+    let state = read_opencode(dir.path());
     assert_eq!(state["url"], "http://127.0.0.1:1", "url 应保留: {state}");
     assert_eq!(state["pid"], 123, "pid 应保留: {state}");
     assert!(
@@ -1055,7 +1222,7 @@ fn reset_session_does_not_touch_running_serve() {
         "reset-session 不应调用 opencode（否则会重拉或杀 serve）"
     );
 
-    let state = read_state(dir.path());
+    let state = read_opencode(dir.path());
     assert_eq!(state["url"], "http://127.0.0.1:1", "url 应保留: {state}");
     assert_eq!(state["pid"], 123, "pid 应保留: {state}");
     assert!(
@@ -1096,7 +1263,7 @@ fi
 
     let first = run_in_dir_owned(dir.path(), &["generate", "list files"], &envs);
     assert!(first.status.success(), "stderr: {}", stderr_str(&first));
-    assert_eq!(read_state(dir.path())["session_id"], "sess-first");
+    assert_eq!(read_opencode(dir.path())["session_id"], "sess-first");
 
     let reset = run_in_dir_owned(dir.path(), &["reset-session"], &reset_envs(dir.path()));
     assert!(reset.status.success(), "stderr: {}", stderr_str(&reset));
@@ -1108,7 +1275,7 @@ fi
         serde_json::json!(["echo hello", "ls -la"])
     );
 
-    let state = read_state(dir.path());
+    let state = read_opencode(dir.path());
     assert_eq!(
         state["session_id"], "sess-second",
         "应落盘新会话 id: {state}"
