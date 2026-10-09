@@ -89,8 +89,8 @@ impl Backend for Omp {
     }
 }
 
-/// 只读叠加配置：bash 白名单逐条照搬 cmd-gen agent、末尾 `*` 拒绝兜底，并屏蔽用户级上下文
-/// （ADR-0009）。
+/// 只读叠加配置：bash 白名单照搬 build.rs 排好的 deny 在前、allow 在后，末尾 `*` 拒绝兜底，
+/// 并屏蔽用户级上下文（ADR-0009）。
 fn readonly_overlay() -> serde_json::Value {
     let mut patterns: Vec<serde_json::Value> = BASH_RULES
         .lines()

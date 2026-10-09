@@ -10,15 +10,24 @@ permission:
     "git log*": allow
     "git show*": allow
     "git rev-parse*": allow
-    "git branch*": allow
+    "git ls-files*": allow
+    "git branch": allow
+    "git branch -a": allow
+    "git branch -r": allow
+    "git branch -v": allow
+    "git branch -vv": allow
+    "git branch -av": allow
+    "git branch --list": allow
+    "git branch --show-current": allow
     "ls *": allow
     "ls": allow
     "cat *": allow
-    "find *": allow
     "grep *": allow
     "pwd": allow
     "docker images*": allow
     "docker ps*": allow
+    "git *--output*": deny
+    "*>*": deny
   external_directory:
     "*": allow
 ---
