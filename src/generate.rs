@@ -17,11 +17,12 @@ fn reuse_session_id(config: &Config) -> Option<String> {
     }
 }
 
-/// 有落盘 id 就续接；没有时按 reuse_session 决定新建常驻会话还是一次性会话（ADR-0007）。
-fn session_for<'a>(config: &Config, session_id: Option<&'a str>) -> Session<'a> {
+/// 有落盘 id 就续接；没有时 `may_create` 且开了 reuse_session 才新建常驻会话，否则一次性
+/// 会话（ADR-0007）。
+fn session_for<'a>(config: &Config, session_id: Option<&'a str>, may_create: bool) -> Session<'a> {
     match session_id {
         Some(id) => Session::Resume(id),
-        None if config.reuse_session => Session::New,
+        None if may_create && config.reuse_session => Session::New,
         None => Session::Oneshot,
     }
 }
@@ -38,7 +39,8 @@ pub fn run(args: GenerateArgs) -> i32 {
     );
     let session_id = reuse_session_id(&config);
     // 会话失效自动重建（ADR-0007）：清掉旧 id，新建会话重试一次。
-    let result = match backend.generate(&request, session_for(&config, session_id.as_deref())) {
+    let session = session_for(&config, session_id.as_deref(), true);
+    let result = match backend.generate(&request, session) {
         Err(BackendError::SessionExpired) => {
             if let Err(err) = crate::resident::clear_session_id() {
                 // 清不掉旧 id 不中断重建，stderr 提示便于诊断。
@@ -108,13 +110,10 @@ fn correction_round(
 ) -> Vec<String> {
     let mut result = passing.to_vec();
     let fix_request = build_fix_request(failing);
-    // 修正轮复用主请求同一常驻会话（ADR-0007）：主请求刚走 json 首次路径时 id 已落盘，这里重读。
+    // 修正轮复用主请求同一常驻会话（ADR-0007）：主请求新建会话时 id 已落盘，这里重读；
+    // 修正轮自己不新建会话。
     let session_id = reuse_session_id(config);
-    // 修正轮不新建会话：没有落盘 id 就一次性跑（ADR-0007）。
-    let session = match &session_id {
-        Some(id) => Session::Resume(id),
-        None => Session::Oneshot,
-    };
+    let session = session_for(config, session_id.as_deref(), false);
     let Ok(reply) = backend.generate(&fix_request, session) else {
         return result;
     };

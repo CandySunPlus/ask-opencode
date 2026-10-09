@@ -6,7 +6,7 @@ use std::time::Duration;
 /// opencode 对已失效会话的硬失败签名（退出码 1 + 这条 stderr，实测见 ADR-0007）。
 const SESSION_NOT_FOUND: &str = "Session not found";
 
-/// 后端的 opencode 实现（ADR-0009）：常驻开关打开且 serve 可用时走 HTTP API，否则 `opencode run`。
+/// 后端的 opencode 实现（ADR-0009），路径选择见 `invoke`。
 pub struct OpenCode {
     pub agent: String,
     pub model: Option<String>,
