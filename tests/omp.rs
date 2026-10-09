@@ -409,7 +409,14 @@ fn generate_with_omp_leaves_saved_opencode_session_untouched() {
     );
     assert!(out.status.success(), "stderr: {}", stderr_str(&out));
     let args = omp.args(1);
-    assert!(args.iter().any(|arg| arg == "--no-session"), "{args:?}");
-    assert!(!args.iter().any(|arg| arg.contains("ses-opencode-1")), "{args:?}");
-    assert_eq!(std::fs::read_to_string(&state).unwrap(), saved);
+    assert!(!args.iter().any(|arg| arg == "--resume"), "{args:?}");
+    assert!(
+        !args.iter().any(|arg| arg.contains("ses-opencode-1")),
+        "{args:?}"
+    );
+    let state: Value = serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+    assert_eq!(
+        state["opencode"],
+        serde_json::json!({"session_id": "ses-opencode-1"})
+    );
 }

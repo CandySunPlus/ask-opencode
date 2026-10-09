@@ -38,6 +38,11 @@ pub trait Backend {
     /// 后端名，也是它在状态文件里的分区名（ADR-0009）。
     fn name(&self) -> &'static str;
 
+    /// 常驻会话 id 在本后端分区里的键路径（ADR-0009）：默认全局一个 `session_id`。
+    fn session_key(&self) -> Vec<String> {
+        vec!["session_id".to_string()]
+    }
+
     fn generate(&self, request: &str, session: Session<'_>) -> Result<Reply, BackendError>;
 }
 

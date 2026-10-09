@@ -125,6 +125,14 @@ pub struct OpenCodeError {
     pub message: String,
 }
 
+impl From<crate::state::StateError> for OpenCodeError {
+    fn from(err: crate::state::StateError) -> Self {
+        OpenCodeError {
+            message: err.message,
+        }
+    }
+}
+
 /// `opencode run` 的输出格式：default 是常规候选文本，json 是事件流（首次建会话用，见 ADR-0007）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {

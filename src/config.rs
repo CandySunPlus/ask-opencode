@@ -26,7 +26,8 @@ pub struct Config {
     /// 是否启用常驻 opencode serve（ADR-0004）：首次调用自动拉起、后续请求走 serve 的 HTTP API 复用。
     /// omp 后端不生效（ADR-0009）。
     pub resident: bool,
-    /// 是否启用常驻会话（ADR-0007）：默认开，关闭时每次请求开全新会话。omp 后端暂不生效。
+    /// 是否启用常驻会话（ADR-0007）：默认开，关闭时每次请求开全新会话。omp 后端按目录各一个
+    /// （ADR-0009）。
     pub reuse_session: bool,
 }
 
@@ -73,6 +74,11 @@ fn config_path() -> Option<PathBuf> {
     }
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".config/ask-opencode/config.json"))
+}
+
+/// omp 会话目录：配置目录下的 `omp-sessions`（ADR-0009）。
+pub fn omp_session_dir() -> Option<PathBuf> {
+    Some(config_path()?.with_file_name("omp-sessions"))
 }
 
 /// 常驻 serve 状态文件路径：与配置文件同目录、文件名 server.json（ADR-0004）。

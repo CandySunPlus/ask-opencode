@@ -9,9 +9,9 @@ use std::io::Write;
 const SNAPSHOT_INVALIDATION: &str = "忽略本会话历史中的旧上下文快照，以本条为准";
 
 /// reuse_session 开启时读当前后端分区里落盘的会话 id；关闭复用或没落盘返回 None（ADR-0007）。
-fn reuse_session_id(config: &Config, backend: &dyn Backend) -> Option<String> {
+fn reuse_session_id(config: &Config, backend: &dyn Backend, key: &[String]) -> Option<String> {
     if config.reuse_session {
-        crate::state::load_session_id(backend.name())
+        crate::state::load_session_id(backend.name(), key)
     } else {
         None
     }
@@ -44,12 +44,13 @@ pub fn run(args: GenerateArgs) -> i32 {
         args.request,
         SNAPSHOT_INVALIDATION
     );
-    let session_id = reuse_session_id(&config, backend.as_ref());
+    let session_key = backend.session_key();
+    let session_id = reuse_session_id(&config, backend.as_ref(), &session_key);
     // 会话失效自动重建（ADR-0007）：清掉旧 id，新建会话重试一次。
     let session = session_for(&config, session_id.as_deref(), true);
     let result = match backend.generate(&request, session) {
         Err(BackendError::SessionExpired) => {
-            if let Err(err) = crate::state::clear_session_id(backend.name()) {
+            if let Err(err) = crate::state::clear_session_id(backend.name(), &session_key) {
                 // 清不掉旧 id 不中断重建，stderr 提示便于诊断。
                 eprintln!("resident: {}", err.message);
             }
@@ -78,7 +79,8 @@ pub fn run(args: GenerateArgs) -> i32 {
         }
     };
     if let Some(new_session_id) = &reply.session_id
-        && let Err(err) = crate::state::save_session_id(backend.name(), new_session_id)
+        && let Err(err) =
+            crate::state::save_session_id(backend.name(), &session_key, new_session_id)
     {
         eprintln!("resident: {}", err.message);
     }
@@ -87,7 +89,7 @@ pub fn run(args: GenerateArgs) -> i32 {
     let final_candidates = if failing.is_empty() {
         passing
     } else {
-        correction_round(&failing, &passing, backend.as_ref(), &config)
+        correction_round(&failing, &passing, backend.as_ref(), &config, &session_key)
     };
     crate::parse::emit_candidates(&final_candidates, "generate")
 }
@@ -114,12 +116,13 @@ fn correction_round(
     passing: &[String],
     backend: &dyn Backend,
     config: &Config,
+    session_key: &[String],
 ) -> Vec<String> {
     let mut result = passing.to_vec();
     let fix_request = build_fix_request(failing);
     // 修正轮复用主请求同一常驻会话（ADR-0007）：主请求新建会话时 id 已落盘，这里重读；
     // 修正轮自己不新建会话。
-    let session_id = reuse_session_id(config, backend);
+    let session_id = reuse_session_id(config, backend, session_key);
     let session = session_for(config, session_id.as_deref(), false);
     let Ok(reply) = backend.generate(&fix_request, session) else {
         return result;

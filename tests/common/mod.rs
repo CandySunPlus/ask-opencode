@@ -208,6 +208,10 @@ pub fn sha256_of(path: &Path) -> String {
 /// fake omp shim（ADR-0009）：每次调用把 argv 记到 `omp-args.<序号>`（`@@@` 分隔），`--config`
 /// 指向的叠加文件当场拷到 `omp-config.<序号>`，stdout 吐第 N 个回复拼成的 `omp --mode json`
 /// NDJSON；调用次数多于回复数时重复最后一个。
+///
+/// 会话：NDJSON 首行 session header 的 id 在 `--resume <id>` 时就是该 id，否则是
+/// `omp-sess-<序号>`。`--resume` 一个被 `expire_session` 标记的 id 时，仿真实 omp 在 stderr 报
+/// `Session "<id>" not found.` 并以 1 退出；`fail_call` 让第 N 次调用以 2 退出。
 pub struct FakeOmp {
     pub bin: PathBuf,
     dir: PathBuf,
@@ -236,6 +240,16 @@ impl FakeOmp {
             .expect("该次调用没有带 --config");
         serde_json::from_str(&text).unwrap()
     }
+
+    /// 让 `--resume <id>` 找不到这个会话。
+    pub fn expire_session(&self, id: &str) {
+        std::fs::write(self.dir.join(format!("omp-dead.{id}")), "").unwrap();
+    }
+
+    /// 让第 `n` 次调用把 `stderr` 写到 stderr 并以 2 退出。
+    pub fn fail_call(&self, n: usize, stderr: &str) {
+        std::fs::write(self.dir.join(format!("omp-fail.{n}")), stderr).unwrap();
+    }
 }
 
 /// 在 `dir` 下写 fake omp，`responses[i]` 是第 i+1 次调用的 assistant 文本。
@@ -257,7 +271,15 @@ pub fn write_fake_omp(dir: &Path, responses: &[&str]) -> FakeOmp {
     let script = format!(
         "n=$(cat \"{d}/omp.count\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"{d}/omp.count\"\n\
          for a in \"$@\"; do printf '%s\\n@@@\\n' \"$a\"; done > \"{d}/omp-args.$n\"\n\
-         prev=; for a in \"$@\"; do [ \"$prev\" = --config ] && cp \"$a\" \"{d}/omp-config.$n\"; prev=$a; done\n\
+         id=\"omp-sess-$n\"; prev=\n\
+         for a in \"$@\"; do\n\
+           [ \"$prev\" = --config ] && cp \"$a\" \"{d}/omp-config.$n\"\n\
+           [ \"$prev\" = --resume ] && id=\"$a\"\n\
+           prev=\"$a\"\n\
+         done\n\
+         if [ -f \"{d}/omp-dead.$id\" ]; then printf 'Error: Session \"%s\" not found.\\n' \"$id\" >&2; exit 1; fi\n\
+         if [ -f \"{d}/omp-fail.$n\" ]; then cat \"{d}/omp-fail.$n\" >&2; exit 2; fi\n\
+         printf '{{\"type\":\"session\",\"id\":\"%s\",\"cwd\":\"%s\"}}\\n' \"$id\" \"$PWD\"\n\
          f=\"{d}/omp-resp.$n\"; [ -f \"$f\" ] || f=\"{d}/omp-resp.last\"; cat \"$f\""
     );
     FakeOmp {
@@ -266,11 +288,11 @@ pub fn write_fake_omp(dir: &Path, responses: &[&str]) -> FakeOmp {
     }
 }
 
-/// 仿 `omp --mode json` 的 NDJSON：session/agent_start 起头，`agent_end` 收尾，最后一条
-/// assistant 消息的 text 内容为 `text`（前面带一条 thinking 与一条更早的 assistant 消息作干扰）。
+/// 仿 `omp --mode json` 首行 session header 之后的 NDJSON（header 由 shim 按会话现写）：
+/// agent_start 起头，`agent_end` 收尾，最后一条 assistant 消息的 text 内容为 `text`（前面带
+/// 一条 thinking 与一条更早的 assistant 消息作干扰）。
 pub fn omp_ndjson(text: &str) -> String {
     let events = [
-        serde_json::json!({"type": "session", "id": "omp-sess-1", "cwd": "/tmp"}),
         serde_json::json!({"type": "agent_start"}),
         serde_json::json!({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "noise"}}),
         serde_json::json!({
