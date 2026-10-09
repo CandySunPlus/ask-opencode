@@ -39,6 +39,7 @@ case "$url" in
   *github.com*releases/latest) redirect="$REDIRECT_TAG_URL"; status="${REDIRECT_STATUS:-200}" ;;
   *install.sh) payload="$FAKE_INSTALL_SCRIPT" ;;
   *ask-opencode.plugin.zsh) payload="$FIXTURE_PLUGIN"; status="${PLUGIN_STATUS:-200}" ;;
+  # 旧路径分支必须在新路径之前：*/agents/cmd-gen.md 也能匹配旧路径。
   */.opencode/agents/cmd-gen.md) payload="$FIXTURE_AGENT"; status="${LEGACY_AGENT_STATUS:-200}" ;;
   */agents/cmd-gen.md) payload="$FIXTURE_AGENT"; status="${AGENT_STATUS:-200}" ;;
   *.tar.gz) payload="$FIXTURE_ASSET"; status="${ASSET_STATUS:-200}" ;;
@@ -905,7 +906,7 @@ fn plugin_download_failure_leaves_no_binary() {
 
 /// cmd-gen agent 新旧路径都 404：整体失败、报错带旧路径 URL、二进制不落盘、agent 目录不创建。
 #[test]
-fn agent_download_failure_leaves_no_binary() {
+fn agent_both_paths_404_leaves_no_binary() {
     let s = setup_sandbox();
     install_fakes(&s);
     make_fixtures(&s);

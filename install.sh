@@ -199,7 +199,7 @@ if [ "$install_plugin" = 1 ]; then
 fi
 
 # cmd-gen agent 与插件同一 tag 契约：从 raw 拉取，失败即整体失败，不留半装（ADR-0008）。
-# 只有 404 才退回旧路径 .opencode/agents/（老 tag 的位置），其余失败照旧直接失败（ADR-0008，#67）。
+# 新路径 404 时退回老 tag 的旧路径 .opencode/agents/（ADR-0008）。
 agent_url="$raw_base/$tag/agents/cmd-gen.md"
 if ! http_code="$(curl -sSL -o "$tmp_dir/cmd-gen.md" -w '%{http_code}' "$agent_url")"; then
   http_code="${http_code:-000}"
