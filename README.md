@@ -67,7 +67,7 @@ source /path/to/ask-opencode/zsh/ask-opencode.plugin.zsh
 - `sensitive_rules`：敏感信息过滤的扩展正则，叠加在内置黑名单之上。
 - `picker`：`skim`（内嵌）或 `fzf`（外部）。
 - `resident`：是否启用常驻 opencode serve（ADR-0004），仅对 opencode 生效。
-- `reuse_session`：是否启用常驻会话（ADR-0007），目前仅对 opencode 生效，omp 每次都开全新会话。
+- `reuse_session`：是否启用常驻会话（ADR-0007）。opencode 下全局一个会话、跨目录共享；omp 下每个目录各一个（按 `$PWD` 区分，不解析符号链接），会话存在配置目录下的 `omp-sessions/`，不混进你日常的 omp 会话列表。
 
 环境变量逐个字段覆盖配置文件：`ASK_OPENCODE_BACKEND`、`ASK_OPENCODE_HISTORY_LIMIT`、`ASK_OPENCODE_INCLUDE_DIRSTACK`、`ASK_OPENCODE_INCLUDE_TOOLS`、`ASK_OPENCODE_SENSITIVE_RULES`（逗号分隔，追加到文件规则之上）、`ASK_OPENCODE_PICKER`、`ASK_OPENCODE_FZF_BIN`、`ASK_OPENCODE_RESIDENT`、`ASK_OPENCODE_REUSE_SESSION`。
 
@@ -78,7 +78,7 @@ ask-opencode generate <请求>            # 调 opencode 为一个请求生成�
 ask-opencode parse [文本]               # 按分隔行契约把候选文本切块为结构化候选（不提供则读 stdin）
 ask-opencode validate [候选]            # 校验一条候选命令，输出 JSON（不提供则读 stdin）
 ask-opencode select --file <结果>       # 在候选里挑一条：弹选择器，危险命令需 [y/N] 确认后输出
-ask-opencode reset-session              # 清空会话 id，下一次请求开全新会话；不动常驻服务
+ask-opencode reset-session              # 清空会话 id，下一次请求开全新会话；不动常驻服务（omp 下只清当前目录的会话）
 ```
 
 zsh 插件直接调用 `generate` 与 `select`，其余子命令供命令行调试与测试。
